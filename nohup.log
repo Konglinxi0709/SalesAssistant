@@ -1,23 +1,47 @@
 nohup: 忽略输入
-处理任务组:   0%|          | 0/4 [00:00<?, ?it/s]处理任务组:  25%|██▌       | 1/4 [00:40<02:00, 40.24s/it]处理任务组:  50%|█████     | 2/4 [01:32<01:34, 47.15s/it]处理任务组:  75%|███████▌  | 3/4 [02:06<00:41, 41.45s/it]处理任务组: 100%|██████████| 4/4 [03:09<00:00, 49.87s/it]处理任务组: 100%|██████████| 4/4 [03:09<00:00, 47.42s/it]
+处理任务组:   0%|          | 0/1 [00:00<?, ?it/s]处理任务组: 100%|██████████| 1/1 [04:07<00:00, 247.70s/it]处理任务组: 100%|██████████| 1/1 [04:07<00:00, 247.70s/it]
 
 第 1 组任务完成:
-  成功任务数: 50
-  失败任务数: 0
+  成功任务数: 24
+  失败任务数: 1
+  失败任务uniq_id: ['fecae857014112d4c82505dd1d26ca8b']
 
-第 2 组任务完成:
-  成功任务数: 50
-  失败任务数: 0
-
-第 3 组任务完成:
-  成功任务数: 50
-  失败任务数: 0
-
-第 4 组任务完成:
-  成功任务数: 50
-  失败任务数: 0
-
-总任务个数 (输入行数): 200
-需要执行的任务个数: 200
-成功执行的任务个数: 200
-失败的任务个数: 0
+总任务个数 (输入行数): 249
+需要执行的任务个数: 25
+成功执行的任务个数: 24
+失败的任务个数: 1
+失败任务的uniq_id (前20个):
+- fecae857014112d4c82505dd1d26ca8b
+Traceback (most recent call last):
+  File "/home/npol/lzy/SalesAssistant/main.py", line 41, in <module>
+    asyncio.run(main())
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/npol/lzy/SalesAssistant/main.py", line 29, in main
+    #await run_concurrent_tasks(
+  File "/home/npol/lzy/SalesAssistant/utils/multi_task.py", line 71, in run_concurrent_tasks
+    input_df = pd.read_csv(input_csv_path)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/site-packages/pandas/io/parsers/readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/site-packages/pandas/io/parsers/readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/site-packages/pandas/io/parsers/readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/site-packages/pandas/io/parsers/readers.py", line 1880, in _make_engine
+    self.handles = get_handle(
+                   ^^^^^^^^^^^
+  File "/home/npol/wangrun/SPECTER2/SPECTER2-main/EN/envs/SaleStratix/lib/python3.11/site-packages/pandas/io/common.py", line 873, in get_handle
+    handle = open(
+             ^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'dataset/processed/consumer_data.csv'

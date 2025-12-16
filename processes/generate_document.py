@@ -48,6 +48,7 @@ async def generate_document_task(row: Dict[str, Any], logger: Callable[[str], No
   价值定位部分：说明产品的市场定位、目标用户群、竞争优势和独特卖点。
   格式：一段markdown风格的文本，不要用```markdown```或``````包括，格式工整规范。
 </value_proposition>
+注意：所有的输出内容必须使用中文
 </output_format>
 <product_info>
   <product_name>{product_name}</product_name>

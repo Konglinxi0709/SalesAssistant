@@ -1,3 +1,4 @@
+from typing import Any
 import pandas as pd
 import json
 import itertools
@@ -116,14 +117,23 @@ def run_consumer_preprocess(input_file, output_file):
             part_indices = [str(part_idx) for part_idx, _ in combination]
             uniq_id = f"{product_uniq_id}_{'_'.join(part_indices)}"
 
-            # 构建消费者群体定义文本
-            definition_parts = [f"【潜在用户群体】\n{user_group}\n"]
+            # 构建消费者群体定义文本为XML风格
+            definition_parts = [f"<potential_user_group>\n{user_group}\n</potential_user_group>"]
 
             for dim_idx, (part_idx, criteria) in enumerate(combination):
                 dim_name = dimension_options[dim_idx]['dimension_name']
-                definition_parts.append(f"【维度 {dim_idx + 1}: {dim_name}】\n{criteria}\n")
+                # 根据part_idx确定部分类型：0=负价值, 1=无价值, 2=正价值
+                part_type_map = {0: "负价值", 1: "无价值", 2: "正价值"}
+                part_type = part_type_map[part_idx]
+                # 对criteria内容做转义可以进一步处理（如需严格XML），此处直接格式化
+                definition_parts.append(
+                    f"<Dimension index=\"{dim_idx + 1}\" name=\"{dim_name}\" segment_type=\"{part_type}\">\n"
+                    f"【属于该部分的条件】{criteria}\n"
+                    f"</Dimension>"
+                )
 
-            consumer_definition = "\n".join(definition_parts)
+            consumer_definition = "<consumer_group_definition>\n" + "\n".join(definition_parts) + "\n</consumer_group_definition>"
+
 
             # 创建新行，复制原行的所有数据
             new_row = row.copy()

@@ -50,7 +50,7 @@ async def market_segment_task(row: Dict[str, Any], logger: Callable[[str], None]
 <analysis_steps>
 1. 依据产品属性定义原则，从产品文档中提炼出该产品的N个独立正交的中性客观属性，N的大小任意，尽可能的找全。注意：属性应该是中性的客观性质，不带有价值判断，大部分属性应具有两面性；同时要考虑产品类目本身带有的属性
 2. 根据当前产品的价值定位，依据潜在用户群体定义原则，定义出所有对该产品有需求的潜在用户群体。
-3. 依据用户维度定义原则，找到M个与一个或多个属性对应，M≤N，优先找到对用户价值判断影响最显著的属性对应的用户维度，并且必须确保用户维度相互之间严格正交独立。所有属性都必须被分配到某个用户维度。
+3. 依据用户维度定义原则，找到M个与一个或多个属性对应，M≤5，优先找到对用户价值判断影响最显著的属性对应的用户维度，并且必须确保用户维度相互之间严格正交独立。
 4. 依据维度划分原则，为每个用户维度分别给出3个部分的判定依据（基于同向属性的价值感知方向）
 </analysis_steps>
 
@@ -82,8 +82,8 @@ async def market_segment_task(row: Dict[str, Any], logger: Callable[[str], None]
 - **反向属性**：负价值群体对该属性感知到正价值，正价值群体感知为负价值，无价值群体对该属性无感知（即与同向属性的价值感知方向相反）
 
 故依据$N$个属性，应该可以找出对应的$M$个用户维度，满足约束条件如下：  
-1. $M≤N$，即用户维度数不超过属性个数
-2. 每个用户维度必须至少有一个同向属性与之对应，反向属性可以为空（即可以没有反向属性）。每个属性必须对应且仅对应一个用户维度。
+1. $M≤min(5, N)$，即用户维度数既不超过属性个数，也不超过5
+2. 每个用户维度必须至少有一个同向属性与之对应，反向属性可以为空（即可以没有反向属性）。每个属性最多对应一个用户维度。由于优先确保用户维度的正交独立以及个数不超过5，允许存在不对应任何用户维度的属性。
 3. 每个用户维度影响且仅影响与之对应的属性（包括同向属性和反向属性），对其它属性几乎无影响  
 4. 用户维度之间严格独立正交，即不存在当用户在A维度取值为a时，在B维度取值为b的概率就会大大增加或减少的情况  
 5. 每个用户维度的命名应从用户角度出发，不能从产品角度出发。
@@ -189,6 +189,8 @@ async def market_segment_task(row: Dict[str, Any], logger: Callable[[str], None]
             raise ValueError("segmentations 必须是长度大于0的数组")
 
         dimensions_count = len(segmentations)
+        if dimensions_count > 5:
+            raise ValueError(f"维度数量超过5，维度数量: {dimensions_count}")
 
         # 3. 验证每个 total_attribute 有必需字段，收集属性名
         attr_name_list = []
@@ -276,13 +278,13 @@ async def market_segment_task(row: Dict[str, Any], logger: Callable[[str], None]
                 raise ValueError(f"segmentations[{i}] 至多只能有一个群体（负/无/正价值群体）为空集（判定依据为空字符串）。")
 
         # 5. 检查所有total_attributes中的属性恰好各对应一个维度
-        for attr_name in attr_name_list:
-            if attr_name not in attr2segment:
-                raise ValueError(f"价值属性 '{attr_name}' 未在任何 segmentation 的 attribute_names 中分配")
-        if len(attr2segment) != len(attr_name_list):
-            extra = set(attr2segment.keys()) - set(attr_name_list)
-            if extra:
-                raise ValueError(f"存在total_attributes中未定义的属性被分配到segmentation: {extra}")
+        # for attr_name in attr_name_list:
+        #     if attr_name not in attr2segment:
+        #         raise ValueError(f"价值属性 '{attr_name}' 未在任何 segmentation 的 attribute_names 中分配")
+        # if len(attr2segment) != len(attr_name_list):
+        #     extra = set(attr2segment.keys()) - set(attr_name_list)
+        #     if extra:
+        #         raise ValueError(f"存在total_attributes中未定义的属性被分配到segmentation: {extra}")
 
         logger(f"[{uniq_id}] 市场细分分析成功: {dimensions_count}个维度")
 

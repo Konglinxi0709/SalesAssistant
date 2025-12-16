@@ -65,7 +65,9 @@ def generate_category_prompt(product_document, categories_xml):
   "category": "产品分类名称（直接使用商品类别XML中的name字段值）",
   "expenditure_category": "消费支出一级大类名称（如：食品烟酒、衣着等），如果不属于居民消费支出则输出空字符串\"\""
 }}
-不要使用```json```或``````包裹
+注意：
+1. 不要使用```json```或``````包裹
+2. 所有的输出必须使用中文
 </output_format>
 """
     return system_prompt, user_prompt.strip()

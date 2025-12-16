@@ -34,7 +34,23 @@ async def proportion_estimate_task(row: Dict[str, Any], logger: Callable[[str], 
     dimensions_info = ""
     for idx, seg in enumerate(segmentations):
         dim_name = seg.get('dimension_name', '')
-        attr_names = seg.get('attribute_names', [])
+        # 兼容新旧格式：优先使用新的同向/反向属性格式，如果没有则使用旧的attribute_names
+        positive_attr_names = seg.get('positive_attribute_names', [])
+        negative_attr_names = seg.get('negative_attribute_names', [])
+        if not positive_attr_names:
+            # 兼容旧格式
+            attr_names = seg.get('attribute_names', [])
+            positive_attr_names = attr_names
+            negative_attr_names = []
+        
+        # 合并所有属性名称用于显示
+        all_attr_names = positive_attr_names + negative_attr_names
+        attr_display = []
+        if positive_attr_names:
+            attr_display.append(f"同向属性: {', '.join(positive_attr_names)}")
+        if negative_attr_names:
+            attr_display.append(f"反向属性: {', '.join(negative_attr_names)}")
+        
         negative = seg.get('negative_value_criteria', '')
         neutral = seg.get('neutral_value_criteria', '')
         positive = seg.get('positive_value_criteria', '')
@@ -48,7 +64,7 @@ async def proportion_estimate_task(row: Dict[str, Any], logger: Callable[[str], 
         dimensions_info += f"""
 <dimension_{idx + 1}>
 <dimension_name>{dim_name}</dimension_name>
-<corresponding_attributes>{', '.join(attr_names)}</corresponding_attributes>
+<corresponding_attributes>{'; '.join(attr_display) if attr_display else ', '.join(all_attr_names)}</corresponding_attributes>
 <negative_value_criteria>{negative_label}</negative_value_criteria>
 <neutral_value_criteria>{neutral_label}</neutral_value_criteria>
 <positive_value_criteria>{positive_label}</positive_value_criteria>
@@ -124,6 +140,7 @@ async def proportion_estimate_task(row: Dict[str, Any], logger: Callable[[str], 
 3. 三个元素之和必须等于1.000
 4. 所有数字保留三位小数
 5. 直接输出数组，不要使用```json```或``````包裹
+6. 所有的输出必须使用中文
 </output_format>
 """
     
