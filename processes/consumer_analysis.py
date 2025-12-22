@@ -16,6 +16,25 @@ def parse_dimension_values(uniq_id: str, product_uniq_id: str) -> list:
     return [int(x) - 1 for x in dimension_codes]
 
 
+def to_plus_minus_features(dim_values: list[int]) -> list[float]:
+    """
+    将每个维度取值 x_i ∈ {-1,0,1} 变换为 (x_i^+, x_i^-)，用于双参数线性拟合：
+
+    x_i^+ = 1 (当 x_i=1) 否则 0
+    x_i^- = -1 (当 x_i=-1) 否则 0
+
+    则 v = β0 + Σ(β_i^+ x_i^+ + β_i^- x_i^-) + ε
+
+    返回特征顺序为：[x_1^+, x_1^-, x_2^+, x_2^-, ...]
+    """
+    feats: list[float] = []
+    for x in dim_values:
+        x_plus = 1.0 if x == 1 else 0.0
+        x_minus = -1.0 if x == -1 else 0.0
+        feats.extend([x_plus, x_minus])
+    return feats
+
+
 def calculate_dimension_variance(proportions: list) -> float:
     """计算维度的方差"""
     if len(proportions) != 3:
@@ -72,6 +91,7 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
     X = []
     y = []
     group_proportions = []
+    group_uniq_ids = []
     # 收集属性打分与维度取值，用于计算k值
     attr_points = {}  # attr_name -> list of (dim_value, score, direction)
     product_uniq_id = product_data.iloc[0]['product_uniq_id']
@@ -86,7 +106,8 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
                 print(f"警告: 维度数量不匹配，期望{num_dimensions}，实际{len(dim_values)}，跳过该行")
                 continue
                 
-            X.append(dim_values)
+            X.append(to_plus_minus_features(dim_values))
+            group_uniq_ids.append(str(row['uniq_id']))
             
             # 获取心理价格作为因变量
             psychological_price_str = str(row['psychological_price']).replace('￥', '').strip()
@@ -135,6 +156,7 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
     X = np.array(X)
     y = np.array(y)
     group_proportions = np.array(group_proportions)
+    group_uniq_ids = np.array(group_uniq_ids, dtype=object)
     
     # 线性回归拟合
     model = LinearRegression()
@@ -148,24 +170,31 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
     mae = mean_absolute_error(y, y_pred)
     rmse = np.sqrt(mse)
     
-    # 获取系数
-    beta_0 = model.intercept_  # 截距项
-    beta_coefs = model.coef_   # 各个维度的系数
+    # 获取系数（双参数：每个维度对应 β_i^+ 与 β_i^-）
+    beta_0 = model.intercept_  # 截距项β0
+    coefs = np.array(model.coef_, dtype=float)  # 长度为 2M
+    if coefs.shape[0] != 2 * num_dimensions:
+        raise ValueError(f"系数维度异常：期望{2 * num_dimensions}，实际{coefs.shape[0]}")
+    beta_plus = coefs[0::2]   # β_i^+（对应x_i^+）
+    beta_minus = coefs[1::2]  # β_i^-（对应x_i^-）
     
     # 计算各维度的重要性指标
     importance_indicators = []
     dimension_variances = []
     
-    for i in range(len(beta_coefs)):
+    for i in range(num_dimensions):
         dim_variance = calculate_dimension_variance(proportion_info[i]['proportions'])
         dimension_variances.append(dim_variance)
-        importance = abs(beta_coefs[i]) * np.sqrt(dim_variance) if dim_variance > 0 else 0.0
+        # 双参数下的“重要性”采用合成强度：sqrt(β+^2 + β-^2) * sqrt(Var)
+        beta_strength = float(np.sqrt(beta_plus[i] ** 2 + beta_minus[i] ** 2))
+        importance = beta_strength * np.sqrt(dim_variance) if dim_variance > 0 else 0.0
         importance_indicators.append(importance)
     
     # 计算最优定价和最大总利润
     try:
         cost_estimate_str = str(product_data.iloc[0]['cost_estimate']).replace('￥', '').strip()
-        cost = float(cost_estimate_str)
+        # cost = float(cost_estimate_str)
+        cost = 0.0 # 放弃使用成本，直接计算最大销售额
     except (ValueError, KeyError) as e:
         print(f"警告: 无法解析成本 ({e})，跳过最优定价计算")
         cost = 0.0
@@ -190,35 +219,63 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
         # 如果利润相同，选择更高的价格（提高利润率）
         elif abs(total_profit - max_profit) < 1e-9 and price > optimal_price:
             optimal_price = price
+
+    # 中心群体：估值恰好等于最优定价的所有群体
+    center_group_ids: list[str] = []
+    try:
+        # 所有群体按估值从小到大排序（稳定排序，保证同估值时相对顺序可复现）
+        order = np.argsort(y, kind="stable")
+        sorted_y = y[order]
+        sorted_ids = group_uniq_ids[order]
+
+        # 中心群体：估值恰好等于最优定价的所有群体
+        center_positions = np.where(sorted_y == optimal_price)[0].tolist()
+        center_group_ids = [str(sorted_ids[p]) for p in center_positions]
+    except Exception as e:
+        print(f"警告: 中心群体计算失败: {e}")
+        center_group_ids = []
     
-    # 基于属性打分与维度取值计算k值（斜率，反向属性取相反数）
+    # 基于属性打分与维度取值计算k值（双参数：k^+ 与 k^-；反向属性取相反数）
+    # 注意：这里仍保留LinearRegression默认截距，以适配“无价值群体平均分不一定为0”的情况。
     k_attr_scores = {}
     for attr_name, records in attr_points.items():
         if not records:
             continue
-        xs = [r[0] for r in records]
+        xs = [r[0] for r in records]  # -1,0,1
         ys = [r[1] for r in records]
         direction = records[0][2]
-        slope = 0.0
+        k_plus = 0.0
+        k_minus = 0.0
         if len(set(xs)) >= 2:
             try:
+                # 构造(x^+, x^-)特征：x^+=1当x=1；x^-=-1当x=-1
+                X_attr = np.array([[1.0 if x == 1 else 0.0, -1.0 if x == -1 else 0.0] for x in xs], dtype=float)
                 lm_attr = LinearRegression()
-                lm_attr.fit(np.array(xs).reshape(-1, 1), np.array(ys))
-                slope = float(lm_attr.coef_[0])
+                lm_attr.fit(X_attr, np.array(ys, dtype=float))
+                coef_attr = np.array(lm_attr.coef_, dtype=float)
+                if coef_attr.shape[0] == 2:
+                    k_plus = float(coef_attr[0])
+                    k_minus = float(coef_attr[1])
             except Exception:
-                slope = 0.0
-        # 单一自变量取值或拟合失败时，斜率为0
+                k_plus = 0.0
+                k_minus = 0.0
+
+        # 若该属性属于“反向”，则将k整体取相反数，使其含义仍为“属性更好 -> 分数更高”
         if direction == "反向":
-            slope = -slope
-        k_attr_scores[attr_name] = slope
+            k_plus = -k_plus
+            k_minus = -k_minus
+
+        k_attr_scores[attr_name] = {"k_plus": k_plus, "k_minus": k_minus}
 
     return {
         'beta_0': float(beta_0),
-        'beta_coefficients': json.dumps([float(x) for x in beta_coefs], ensure_ascii=False),
+        'beta_plus_coefficients': json.dumps([float(x) for x in beta_plus], ensure_ascii=False),
+        'beta_minus_coefficients': json.dumps([float(x) for x in beta_minus], ensure_ascii=False),
         'dimension_variances': json.dumps([float(x) for x in dimension_variances], ensure_ascii=False),
         'importance_indicators': json.dumps([float(x) for x in importance_indicators], ensure_ascii=False),
         'optimal_price': float(optimal_price),
         'max_total_profit': float(max_profit),
+        'optimal_price_center_group_ids': json.dumps(center_group_ids, ensure_ascii=False),
         'r_squared': float(model.score(X, y)),
         'mse': float(mse),
         'mae': float(mae),
@@ -275,8 +332,9 @@ def run_consumer_analysis(input_file: str, output_file: str):
             # 即使分析失败，也保留原始数据，但添加空指标字段（设为NaN）以保持输出结构一致
             print(f"警告: 产品 {product_name} 分析失败，保留原始数据但指标字段为空")
             indicator_fields = [
-                'beta_0', 'beta_coefficients', 'dimension_variances', 
+                'beta_0', 'beta_plus_coefficients', 'beta_minus_coefficients', 'dimension_variances',
                 'importance_indicators', 'optimal_price', 'max_total_profit',
+                'optimal_price_center_group_ids',
                 'r_squared', 'mse', 'mae', 'rmse', 'k_attr_scores'
             ]
             for _, row in product_data.iterrows():
