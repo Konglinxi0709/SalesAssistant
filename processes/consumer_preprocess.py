@@ -6,8 +6,6 @@ import numpy as np
 
 def run_consumer_preprocess(input_file, output_file):
     """
-    将with_proportion_data.csv处理为consumer_data.csv
-
     参数:
     - input_file: 输入的CSV文件路径（with_proportion_data.csv）
     - output_file: 输出的CSV文件路径（consumer_data.csv）

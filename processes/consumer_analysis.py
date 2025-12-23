@@ -51,22 +51,29 @@ def calculate_dimension_variance(proportions: list) -> float:
     return variance
 
 
-def analyze_product_market(product_data: pd.DataFrame) -> dict:
+def analyze_product_market(product_row: pd.Series) -> dict:
     """
     分析单个产品的市场表现，计算各项指标
     
     参数:
-    - product_data: 包含同一产品所有消费者数据的DataFrame
+    - product_row: 包含产品信息和users_data字段的Series（一行数据）
     
     返回:
     - 包含各项指标的字典，如果分析失败返回None
     """
-    if len(product_data) == 0:
+    # 从users_data中解析用户数据
+    try:
+        users_data = json.loads(product_row['users_data']) if isinstance(product_row['users_data'], str) else product_row['users_data']
+        if not isinstance(users_data, list) or len(users_data) == 0:
+            print(f"警告: 产品 {product_row.get('modified_name', 'unknown')} 的users_data格式不正确或为空")
+            return None
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        print(f"警告: 解析users_data时出错: {e}")
         return None
     
     # 提取维度比例信息
     try:
-        proportion_info = json.loads(product_data.iloc[0]['proportion_estimate'])
+        proportion_info = json.loads(product_row['proportion_estimate']) if isinstance(product_row['proportion_estimate'], str) else product_row['proportion_estimate']
     except (json.JSONDecodeError, KeyError) as e:
         print(f"警告: 解析proportion_estimate时出错: {e}")
         return None
@@ -74,8 +81,10 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
     # 提取分群结果，建立属性到维度的映射（含正向/反向）
     attr_dim_map = {}
     try:
-        segmentation_result_str = product_data.iloc[0].get('segmentation_result', '{}')
-        segmentation_result = json.loads(segmentation_result_str) if segmentation_result_str else {}
+        segmentation_result_str = product_row.get('segmentation_result', '{}')
+        segmentation_result = json.loads(segmentation_result_str) if isinstance(segmentation_result_str, str) else segmentation_result_str
+        if not isinstance(segmentation_result, dict):
+            segmentation_result = {}
         for dim_idx, seg in enumerate(segmentation_result.get('segmentations', [])):
             for attr in seg.get('positive_attribute_names', []):
                 attr_dim_map[attr] = (dim_idx, "正向")
@@ -94,29 +103,39 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
     group_uniq_ids = []
     # 收集属性打分与维度取值，用于计算k值
     attr_points = {}  # attr_name -> list of (dim_value, score, direction)
-    product_uniq_id = product_data.iloc[0]['product_uniq_id']
+    product_uniq_id = product_row['uniq_id']  # 注意：已重命名为uniq_id
     
-    for _, row in product_data.iterrows():
+    for user_data in users_data:
         try:
+            # 从user_data中获取user_uniq_id（原uniq_id）
+            user_uniq_id = user_data.get('user_uniq_id', '')
+            if not user_uniq_id:
+                print(f"警告: 用户数据缺少user_uniq_id，跳过")
+                continue
+            
             # 解析维度值
-            dim_values = parse_dimension_values(row['uniq_id'], product_uniq_id)
+            dim_values = parse_dimension_values(user_uniq_id, product_uniq_id)
             
             # 确保维度数量匹配
             if len(dim_values) != num_dimensions:
-                print(f"警告: 维度数量不匹配，期望{num_dimensions}，实际{len(dim_values)}，跳过该行")
+                print(f"警告: 维度数量不匹配，期望{num_dimensions}，实际{len(dim_values)}，跳过该用户")
                 continue
                 
             X.append(to_plus_minus_features(dim_values))
-            group_uniq_ids.append(str(row['uniq_id']))
+            group_uniq_ids.append(str(user_uniq_id))
             
             # 获取心理价格作为因变量
-            psychological_price_str = str(row['psychological_price']).replace('￥', '').strip()
+            psychological_price_str = str(user_data.get('psychological_price', '0')).replace('￥', '').strip()
             psychological_price = float(psychological_price_str)
             y.append(psychological_price)
 
             # 收集属性打分数据
             try:
-                attr_analysis = json.loads(row.get('attribute_analysis', '[]'))
+                attr_analysis = user_data.get('attribute_analysis', '[]')
+                if isinstance(attr_analysis, str):
+                    attr_analysis = json.loads(attr_analysis)
+                elif not isinstance(attr_analysis, list):
+                    attr_analysis = []
             except (json.JSONDecodeError, TypeError):
                 attr_analysis = []
             for item in attr_analysis:
@@ -150,7 +169,7 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
             continue
     
     if len(X) == 0:
-        print(f"错误: 没有有效数据用于产品 {product_data.iloc[0].get('modified_name', 'unknown')}")
+        print(f"错误: 没有有效数据用于产品 {product_row.get('modified_name', 'unknown')}")
         return None
     
     X = np.array(X)
@@ -192,7 +211,7 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
     
     # 计算最优定价和最大总利润
     try:
-        cost_estimate_str = str(product_data.iloc[0]['cost_estimate']).replace('￥', '').strip()
+        cost_estimate_str = str(product_row.get('cost_estimate', '0')).replace('￥', '').strip()
         # cost = float(cost_estimate_str)
         cost = 0.0 # 放弃使用成本，直接计算最大销售额
     except (ValueError, KeyError) as e:
@@ -286,11 +305,11 @@ def analyze_product_market(product_data: pd.DataFrame) -> dict:
 
 def run_consumer_analysis(input_file: str, output_file: str):
     """
-    将consumer_feedback_data.csv处理为consumer_analysis.csv，添加市场分析指标
+    将consumer_feedback_data.csv处理为with_consumer_analysis_data.csv，添加市场分析指标
     
     参数:
     - input_file: 输入的CSV文件路径（consumer_feedback_data.csv）
-    - output_file: 输出的CSV文件路径（consumer_analysis.csv）
+    - output_file: 输出的CSV文件路径（with_consumer_analysis_data.csv）
     """
     # 读取输入文件
     df = pd.read_csv(input_file)
@@ -302,11 +321,15 @@ def run_consumer_analysis(input_file: str, output_file: str):
     if missing_columns:
         raise ValueError(f"输入文件缺少必要的列: {missing_columns}")
     
+    # 定义用户级别字段（需要聚合到users_data）
+    user_level_fields = ['uniq_id', 'attribute_analysis', 'psychological_price', 
+                        'user_profile', 'user_profile_rationale', 'consumer_definition']
+    
     # 按产品分组
     product_groups = df.groupby('product_uniq_id')
     print(f"发现 {len(product_groups)} 个不同产品")
     
-    # 存储处理后的数据
+    # 存储处理后的数据（一行一个产品）
     processed_rows = []
     analyzed_count = 0
     failed_count = 0
@@ -316,17 +339,40 @@ def run_consumer_analysis(input_file: str, output_file: str):
         product_name = product_data.iloc[0].get('modified_name', product_id)
         print(f"正在分析产品: {product_name} (共 {len(product_data)} 个消费者)")
         
+        # 取第一行作为产品级别数据
+        product_row = product_data.iloc[0].copy()
+        
+        # 将product_uniq_id重命名为uniq_id
+        product_row['uniq_id'] = product_row['product_uniq_id']
+        
+        # 聚合用户数据
+        users_data = []
+        for _, user_row in product_data.iterrows():
+            user_dict = {}
+            for field in user_level_fields:
+                if field in user_row:
+                    # 将uniq_id重命名为user_uniq_id
+                    if field == 'uniq_id':
+                        user_dict['user_uniq_id'] = user_row[field]
+                    else:
+                        user_dict[field] = user_row[field]
+            users_data.append(user_dict)
+        
+        # 将users_data添加到产品行
+        product_row['users_data'] = json.dumps(users_data, ensure_ascii=False)
+        
+        # 删除product_uniq_id字段（已重命名为uniq_id）
+        if 'product_uniq_id' in product_row:
+            del product_row['product_uniq_id']
+        
         # 分析该产品
-        analysis_result = analyze_product_market(product_data)
+        analysis_result = analyze_product_market(product_row)
         
         if analysis_result:
-            # 为该产品的所有消费者行添加分析指标
-            for _, row in product_data.iterrows():
-                new_row = row.copy()
-                # 添加所有分析指标
-                for key, value in analysis_result.items():
-                    new_row[key] = value
-                processed_rows.append(new_row)
+            # 添加所有分析指标到产品行
+            for key, value in analysis_result.items():
+                product_row[key] = value
+            processed_rows.append(product_row)
             analyzed_count += 1
         else:
             # 即使分析失败，也保留原始数据，但添加空指标字段（设为NaN）以保持输出结构一致
@@ -337,12 +383,9 @@ def run_consumer_analysis(input_file: str, output_file: str):
                 'optimal_price_center_group_ids',
                 'r_squared', 'mse', 'mae', 'rmse', 'k_attr_scores'
             ]
-            for _, row in product_data.iterrows():
-                new_row = row.copy()
-                # 添加空指标字段
-                for field in indicator_fields:
-                    new_row[field] = None
-                processed_rows.append(new_row)
+            for field in indicator_fields:
+                product_row[field] = None
+            processed_rows.append(product_row)
             failed_count += 1
     
     if not processed_rows:
@@ -357,6 +400,6 @@ def run_consumer_analysis(input_file: str, output_file: str):
     print(f"\n处理完成!")
     print(f"  成功分析产品数: {analyzed_count}")
     print(f"  分析失败产品数: {failed_count}")
-    print(f"  总消费者行数: {len(result_df)}")
+    print(f"  总产品行数: {len(result_df)}")
     print(f"  结果已保存到: {output_file}")
 

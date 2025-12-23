@@ -5,6 +5,7 @@ import os
 import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
+import argparse
 
 # 设置matplotlib后端，防止在无GUI环境下报错
 matplotlib.use('Agg')
@@ -238,7 +239,10 @@ def plot_group_valuation_histogram(groups, title, filename, optimal_price: float
 
 def analyze_consumer_data(input_file, output_file):
     # 确保图片输出目录存在
-    img_dir = os.path.join(os.path.dirname(output_file), 'pictures')
+    # 从输出文件名中提取基础名称（不含扩展名），创建 基础名称_pictures 文件夹
+    output_basename = os.path.splitext(os.path.basename(output_file))[0]
+    img_dir_name = f"{output_basename}_pictures"
+    img_dir = os.path.join(os.path.dirname(output_file), img_dir_name)
     if not os.path.exists(img_dir):
         os.makedirs(img_dir)
 
@@ -251,35 +255,39 @@ def analyze_consumer_data(input_file, output_file):
     # 存储所有产品的统计信息
     products_data = {}
 
-    # 1. 遍历每一行数据，构建产品和属性的统计映射
+    # 1. 遍历每一行数据（一行一个产品），构建产品和属性的统计映射
     for index, row in df.iterrows():
         product_name = row['modified_name']
-        product_uniq_id = row['product_uniq_id']
+        # 新格式：uniq_id是产品ID（原product_uniq_id）
+        product_uniq_id = row.get('uniq_id') or row.get('product_uniq_id')
         beta_plus_coeffs = safe_json_loads(row.get('beta_plus_coefficients'))
         beta_minus_coeffs = safe_json_loads(row.get('beta_minus_coefficients'))
         segmentation = safe_json_loads(row['segmentation_result'])
-        attr_analysis = safe_json_loads(row['attribute_analysis'])
         k_attr_scores = safe_json_loads(row.get('k_attr_scores'))
-        uniq_id = str(row['uniq_id'])
         price_str = row.get('retail_price', '1') # 获取价格
         beta_0 = row.get('beta_0')
         optimal_price = row.get('optimal_price')
         max_total_profit = row.get('max_total_profit')
         center_group_ids = safe_json_loads(row.get('optimal_price_center_group_ids'))
         proportion_estimate = safe_json_loads(row.get('proportion_estimate'))
+        
+        # 从users_data中解析用户数据
+        users_data = safe_json_loads(row.get('users_data', '[]'))
+        if not isinstance(users_data, list):
+            print(f"警告: 产品 {product_name} 的users_data格式不正确，跳过")
+            continue
 
         if (not product_name
             or beta_plus_coeffs is None
             or beta_minus_coeffs is None
-            or segmentation is None
-            or attr_analysis is None):
+            or segmentation is None):
             continue
         if (not isinstance(beta_plus_coeffs, list)
             or not isinstance(beta_minus_coeffs, list)
             or len(beta_plus_coeffs) != len(beta_minus_coeffs)):
             continue
 
-        # 初始化产品数据结构
+        # 初始化产品数据结构（每个产品只初始化一次）
         if product_name not in products_data:
             price = parse_price(price_str)
             beta_plus = [float(b) for b in beta_plus_coeffs]
@@ -347,72 +355,79 @@ def analyze_consumer_data(input_file, output_file):
             }
 
         num_dims = len(beta_plus_coeffs)
-        parts = uniq_id.split('_')
+        p_data = products_data[product_name]
+        attr_map = p_data['attr_map']
         
-        # 提取用户维度取值
-        if len(parts) >= num_dims:
+        # 遍历该产品的所有用户
+        for user_dict in users_data:
+            # 从user_uniq_id恢复为uniq_id（用于解析维度取值）
+            uniq_id = str(user_dict.get('user_uniq_id') or user_dict.get('uniq_id', ''))
+            attr_analysis = safe_json_loads(user_dict.get('attribute_analysis'))
+            
+            if not attr_analysis:
+                continue
+            
+            parts = uniq_id.split('_')
+            
+            # 提取用户维度取值
+            if len(parts) < num_dims:
+                continue
             try:
                 user_dim_values = [int(x) for x in parts[-num_dims:]]
             except ValueError:
                 continue
-        else:
-            continue
 
-        # 更新“该产品各维度是否存在某种取值的群体”的统计
-        try:
-            p_data = products_data[product_name]
-            for i, v in enumerate(user_dim_values):
-                if v == 2 and i < len(p_data['dim_has_pos_value']):
-                    p_data['dim_has_pos_value'][i] = True
-                if v == 0 and i < len(p_data['dim_has_neg_value']):
-                    p_data['dim_has_neg_value'][i] = True
-        except Exception:
-            pass
+            # 更新"该产品各维度是否存在某种取值的群体"的统计
+            try:
+                for i, v in enumerate(user_dim_values):
+                    if v == 2 and i < len(p_data['dim_has_pos_value']):
+                        p_data['dim_has_pos_value'][i] = True
+                    if v == 0 and i < len(p_data['dim_has_neg_value']):
+                        p_data['dim_has_neg_value'][i] = True
+            except Exception:
+                pass
 
-        # 统计该用户的属性打分
-        p_data = products_data[product_name]
-        attr_map = p_data['attr_map']
-        
-        for attr_item in attr_analysis:
-            attr_name = attr_item.get('attribute_name')
-            actual_score = attr_item.get('attribute_score')
-            
-            if attr_name in attr_map:
-                info = attr_map[attr_name]
-                dim_idx = info['dim_index']
-                direction = info['direction']
+            # 统计该用户的属性打分
+            for attr_item in attr_analysis:
+                attr_name = attr_item.get('attribute_name')
+                actual_score = attr_item.get('attribute_score')
                 
-                if dim_idx < len(user_dim_values):
-                    user_val_for_dim = user_dim_values[dim_idx] # 0, 1, or 2
+                if attr_name in attr_map:
+                    info = attr_map[attr_name]
+                    dim_idx = info['dim_index']
+                    direction = info['direction']
                     
-                    if attr_name not in p_data['stats']:
-                        p_data['stats'][attr_name] = {
-                            0: {'correct': 0, 'total': 0, 'score_sum': 0, 'score_counts': {-2:0, -1:0, 0:0, 1:0, 2:0}}, 
-                            1: {'correct': 0, 'total': 0, 'score_sum': 0, 'score_counts': {-2:0, -1:0, 0:0, 1:0, 2:0}}, 
-                            2: {'correct': 0, 'total': 0, 'score_sum': 0, 'score_counts': {-2:0, -1:0, 0:0, 1:0, 2:0}}
-                        }
-                    
-                    stat_entry = p_data['stats'][attr_name][user_val_for_dim]
-                    stat_entry['total'] += 1
-                    stat_entry['score_sum'] += actual_score # 累加分数
-                    
-                    # 记录具体的分布，防止KeyError（虽然理论上分数应该在-2到2之间）
-                    safe_score = int(actual_score)
-                    if safe_score in stat_entry['score_counts']:
-                        stat_entry['score_counts'][safe_score] += 1
-                    
-                    is_match = False
-                    if direction == '正向':
-                        if user_val_for_dim == 0 and actual_score < 0: is_match = True
-                        elif user_val_for_dim == 1 and actual_score == 0: is_match = True
-                        elif user_val_for_dim == 2 and actual_score > 0: is_match = True
-                    elif direction == '反向':
-                        if user_val_for_dim == 0 and actual_score > 0: is_match = True
-                        elif user_val_for_dim == 1 and actual_score == 0: is_match = True
-                        elif user_val_for_dim == 2 and actual_score < 0: is_match = True
-                    
-                    if is_match:
-                        stat_entry['correct'] += 1
+                    if dim_idx < len(user_dim_values):
+                        user_val_for_dim = user_dim_values[dim_idx] # 0, 1, or 2
+                        
+                        if attr_name not in p_data['stats']:
+                            p_data['stats'][attr_name] = {
+                                0: {'correct': 0, 'total': 0, 'score_sum': 0, 'score_counts': {-2:0, -1:0, 0:0, 1:0, 2:0}}, 
+                                1: {'correct': 0, 'total': 0, 'score_sum': 0, 'score_counts': {-2:0, -1:0, 0:0, 1:0, 2:0}}, 
+                                2: {'correct': 0, 'total': 0, 'score_sum': 0, 'score_counts': {-2:0, -1:0, 0:0, 1:0, 2:0}}
+                            }
+                        
+                        stat_entry = p_data['stats'][attr_name][user_val_for_dim]
+                        stat_entry['total'] += 1
+                        stat_entry['score_sum'] += actual_score # 累加分数
+                        
+                        # 记录具体的分布，防止KeyError（虽然理论上分数应该在-2到2之间）
+                        safe_score = int(actual_score)
+                        if safe_score in stat_entry['score_counts']:
+                            stat_entry['score_counts'][safe_score] += 1
+                        
+                        is_match = False
+                        if direction == '正向':
+                            if user_val_for_dim == 0 and actual_score < 0: is_match = True
+                            elif user_val_for_dim == 1 and actual_score == 0: is_match = True
+                            elif user_val_for_dim == 2 and actual_score > 0: is_match = True
+                        elif direction == '反向':
+                            if user_val_for_dim == 0 and actual_score > 0: is_match = True
+                            elif user_val_for_dim == 1 and actual_score == 0: is_match = True
+                            elif user_val_for_dim == 2 and actual_score < 0: is_match = True
+                        
+                        if is_match:
+                            stat_entry['correct'] += 1
 
     # 2. 计算全局统计、k比例分布以及绘图数据
     global_stats = {
@@ -688,22 +703,22 @@ def analyze_consumer_data(input_file, output_file):
         f.write("### k为正比例分布下的β方向占比（双β）\n\n")
         if k_ratio_buckets_plus:
             f.write("#### k_plus为正比例分布下的β+方向占比\n\n")
-            f.write("![k_ratio_beta_plus_distribution](pictures/k_ratio_beta_plus_distribution.png)\n\n")
+            f.write(f"![k_ratio_beta_plus_distribution]({img_dir_name}/k_ratio_beta_plus_distribution.png)\n\n")
         else:
             f.write("> 无可用数据生成 β+ 的k比例分布图\n\n")
 
         if k_ratio_buckets_neg:
             f.write("#### $k^-$为正比例分布下的$\\beta^-$方向占比\n\n")
-            f.write("![k_ratio_beta_neg_distribution](pictures/k_ratio_beta_neg_distribution.png)\n\n")
+            f.write(f"![k_ratio_beta_neg_distribution]({img_dir_name}/k_ratio_beta_neg_distribution.png)\n\n")
         else:
             f.write("> 无可用数据生成 $\\beta^-$ 的k比例分布图\n\n")
         
         f.write("## 2. 平均分与$\\beta$散点图 (Avg Score vs $\\beta$)\n\n")
         f.write("> **注**: 这里只统计：负价值群体平均分 vs $\\beta^-$；正价值群体平均分 vs $\\beta^+$\n\n")
         f.write("### 负价值群体平均分 vs $\\beta^-$\n")
-        f.write("![Negative Value Group Avg Score vs Beta_Minus](pictures/neg_value_avg_score_vs_beta_minus.png)\n\n")
+        f.write(f"![Negative Value Group Avg Score vs Beta_Minus]({img_dir_name}/neg_value_avg_score_vs_beta_minus.png)\n\n")
         f.write("### 正价值群体平均分 vs $\\beta^+$\n")
-        f.write("![Positive Value Group Avg Score vs Beta_Plus](pictures/pos_value_avg_score_vs_beta_plus.png)\n\n")
+        f.write(f"![Positive Value Group Avg Score vs Beta_Plus]({img_dir_name}/pos_value_avg_score_vs_beta_plus.png)\n\n")
 
         f.write("## 3. 产品详细分析 (Product Details)\n\n")
         
@@ -736,17 +751,34 @@ def analyze_consumer_data(input_file, output_file):
 
             # 群体估值柱状图
             f.write("#### 产品的群体估值柱状图\n\n")
-            sub_df = df[df['product_uniq_id'] == data['product_uniq_id']]
+            # 从users_data中获取用户数据
+            product_row = df[df['uniq_id'] == data['product_uniq_id']]
+            if product_row.empty:
+                product_row = df[df['product_uniq_id'] == data['product_uniq_id']]
+            users_data = []
+            if not product_row.empty:
+                row = product_row.iloc[0]
+                users_data = safe_json_loads(row.get('users_data', '[]'))
+                if not isinstance(users_data, list):
+                    users_data = []
             num_dims = len(data.get('beta_plus', []) or [])
             optimal_price_val = float(data.get('optimal_price') or 0.0)
             prop_est = data.get('proportion_estimate')
             groups_list = []
-            if not sub_df.empty and isinstance(prop_est, list) and num_dims > 0:
-                for gid, gdf in sub_df.groupby('uniq_id'):
+            if users_data and isinstance(prop_est, list) and num_dims > 0:
+                # 按uniq_id分组
+                groups_dict = {}
+                for user_row in users_data:
+                    gid = str(user_row.get('user_uniq_id') or user_row.get('uniq_id', ''))
+                    if gid not in groups_dict:
+                        groups_dict[gid] = []
+                    groups_dict[gid].append(user_row)
+                
+                for gid, user_rows in groups_dict.items():
                     dim_vals = _parse_group_dim_values_from_uniq_id(gid, num_dims)
                     if dim_vals is None:
                         continue
-                    vals = [parse_price(x) for x in gdf['psychological_price'].tolist()]
+                    vals = [parse_price(row.get('psychological_price', '0')) for row in user_rows]
                     valuation = float(np.mean(vals)) if vals else 0.0
                     proportion = _calc_group_proportion(prop_est, dim_vals)
                     dim_code = "".join(str(int(v)) for v in dim_vals)
@@ -760,7 +792,7 @@ def analyze_consumer_data(input_file, output_file):
                     chart_path,
                     optimal_price_val
                 )
-                f.write(f"![Group Valuations](pictures/{chart_filename})\n\n")
+                f.write(f"![Group Valuations]({img_dir_name}/{chart_filename})\n\n")
             else:
                 f.write("> 无可用数据生成群体估值柱状图\n\n")
             
@@ -854,7 +886,7 @@ def analyze_consumer_data(input_file, output_file):
                                 f"Score Distribution for '{attr}'",
                                 chart_path
                             )
-                            f.write(f"\n    ![Score Distribution for {attr}](pictures/{chart_filename})\n\n")
+                            f.write(f"\n    ![Score Distribution for {attr}]({img_dir_name}/{chart_filename})\n\n")
 
                 # 维度取值判定标准及证明
                 f.write("- **取值判定标准及合理性**:\n")
@@ -875,8 +907,17 @@ def analyze_consumer_data(input_file, output_file):
             # 中心群体的群体定义和优化建议（来自consumer_analysis.csv已计算的中心群体集合）
             f.write("#### 中心群体（与最佳定价估值相等的群体）\n\n")
             center_ids = data.get('center_group_ids', []) or []
-            # 建立uniq_id -> 单行记录，用于读取该群体的优化建议
-            sub_df = df[df['product_uniq_id'] == data['product_uniq_id']]
+            # 从users_data中获取用户数据
+            product_row = df[df['uniq_id'] == data['product_uniq_id']]
+            if product_row.empty:
+                product_row = df[df['product_uniq_id'] == data['product_uniq_id']]
+            if product_row.empty:
+                f.write("> 未找到该产品数据\n\n")
+                continue
+            row = product_row.iloc[0]
+            users_list = safe_json_loads(row.get('users_data', '[]'))
+            if not isinstance(users_list, list):
+                users_list = []
             num_dims = len(data.get('beta_plus', []) or [])
             prop_est = data.get('proportion_estimate')
             
@@ -921,12 +962,18 @@ def analyze_consumer_data(input_file, output_file):
                     else:
                         f.write("> 无法解析该群体维度取值\n\n")
 
-                    matched = sub_df[sub_df['uniq_id'].astype(str) == str(gid)]
-                    if matched.empty:
+                    # 从users_list中查找匹配的用户
+                    matched_user = None
+                    for user_row in users_list:
+                        if str(user_row.get('user_uniq_id', '')) == str(gid):
+                            matched_user = user_row
+                            break
+                    
+                    if matched_user is None:
                         f.write("> 未找到该群体对应的attribute_analysis\n\n")
                         continue
 
-                    row0 = matched.iloc[0]
+                    row0 = matched_user
                     aa = safe_json_loads(row0.get('attribute_analysis'))
                     if not isinstance(aa, list):
                         f.write("> attribute_analysis解析失败\n\n")
@@ -991,6 +1038,8 @@ def analyze_consumer_data(input_file, output_file):
 
             # 属性优化优先顺序表
             f.write("#### 属性优化优先顺序表\n\n")
+            # 获取该产品的用户数据（使用上面已经获取的users_list）
+            users_list_opt = users_list
             prop_est = data.get('proportion_estimate')
             beta_plus_list = data.get('beta_plus', []) or []
             beta_minus_list = data.get('beta_minus', []) or []
@@ -1155,18 +1204,23 @@ def analyze_consumer_data(input_file, output_file):
                     
                     # 找到与该优化建议所属的维度和维度取值一致的用户群体
                     matching_groups = []
-                    for _, row in sub_df.iterrows():
-                        gid = str(row['uniq_id'])
+                    for user_row in users_list_opt:
+                        gid = str(user_row.get('user_uniq_id', ''))
                         group_dim_vals = _parse_group_dim_values_from_uniq_id(gid, num_dims)
                         if group_dim_vals is not None and dim_idx < len(group_dim_vals):
                             # 检查该群体在该维度上的取值是否匹配
                             if group_dim_vals[dim_idx] == dim_val:
                                 # 获取该群体的估值（从当前行的psychological_price获取）
-                                price_str = row.get('psychological_price', '0')
+                                price_str = user_row.get('psychological_price', '0')
                                 valuation = parse_price(price_str)
                                 
                                 # 获取该群体对该属性的打分
-                                aa = safe_json_loads(row.get('attribute_analysis'))
+                                aa = user_row.get('attribute_analysis')
+                                if isinstance(aa, str):
+                                    aa = safe_json_loads(aa)
+                                elif not isinstance(aa, list):
+                                    aa = safe_json_loads(str(aa)) if aa else []
+                                
                                 attr_score = None
                                 if isinstance(aa, list):
                                     for item in aa:
@@ -1179,7 +1233,7 @@ def analyze_consumer_data(input_file, output_file):
                                         'gid': gid,
                                         'valuation': valuation,
                                         'attr_score': attr_score,
-                                        'row': row
+                                        'row': user_row
                                     })
                     
                     # 对匹配的群体进行排序
@@ -1231,10 +1285,18 @@ def analyze_consumer_data(input_file, output_file):
 
     print(f"Analysis complete. Report generated at {output_file}")
 
+
 if __name__ == "__main__":
-    input_csv = 'dataset/processed/consumer_analysis.csv'
-    output_md = 'dataset/processed/consumer_analysis.md'
-    
+    parser = argparse.ArgumentParser(description="分析消费者反馈数据并生成Markdown报告")
+    parser.add_argument('--input', type=str, default='dataset/processed/with_consumer_analysis_data.csv',
+                        help='输入CSV文件路径（默认: dataset/processed/with_consumer_analysis_data.csv）')
+    parser.add_argument('--output', type=str, default='dataset/processed/consumer_analysis.md',
+                        help='输出Markdown文件路径（默认: dataset/processed/consumer_analysis.md）')
+    args = parser.parse_args()
+
+    input_csv = args.input
+    output_md = args.output
+
     if os.path.exists(input_csv):
         analyze_consumer_data(input_csv, output_md)
     else:
