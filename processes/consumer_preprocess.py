@@ -1,14 +1,15 @@
-from typing import Any
+from typing import Any, Optional
 import pandas as pd
 import json
 import itertools
 import numpy as np
 
-def run_consumer_preprocess(input_file, output_file):
+def run_consumer_preprocess(input_file, output_file, max_total_product: Optional[int] = None):
     """
     参数:
     - input_file: 输入的CSV文件路径（with_proportion_data.csv）
     - output_file: 输出的CSV文件路径（consumer_data.csv）
+    - max_total_product: 可选，最多处理前max_total_product个产品（基于唯一的product_uniq_id）
     """
     # 读取输入文件
     df = pd.read_csv(input_file)
@@ -16,6 +17,12 @@ def run_consumer_preprocess(input_file, output_file):
     # 把原始uniq_id字段重命名为product_uniq_id
     if 'uniq_id' in df.columns:
         df = df.rename(columns={'uniq_id': 'product_uniq_id'})
+
+    # 如果有产品个数的限制，筛选前max_total_product个唯一产品
+    if max_total_product is not None:
+        # 首先确保按原顺序保留出现的product_uniq_id
+        product_ids = df['product_uniq_id'].drop_duplicates().head(max_total_product).tolist()
+        df = df[df['product_uniq_id'].isin(product_ids)]
 
     # 存储所有消费者数据
     consumer_rows = []
@@ -125,7 +132,7 @@ def run_consumer_preprocess(input_file, output_file):
                 part_type = part_type_map[part_idx]
                 # 对criteria内容做转义可以进一步处理（如需严格XML），此处直接格式化
                 definition_parts.append(
-                    f"<Dimension index=\"{dim_idx + 1}\" name=\"{dim_name}\" segment_type=\"{part_type}\">\n"
+                    f"<Dimension index=\"{dim_idx + 1}\" name=\"{dim_name}\">\n"
                     f"【属于该部分的条件】{criteria}\n"
                     f"</Dimension>"
                 )

@@ -62,6 +62,100 @@ def plot_scatter(data_points, title, filename, color):
     plt.savefig(filename)
     plt.close()
 
+def plot_dimension_value_distribution(dim_value_counts, title, filename, num_dims, dim_names):
+    """
+    绘制维度取值分布柱状图
+    参数:
+    - dim_value_counts: dict {dim_idx: {0: count, 1: count, 2: count}}，每个维度的每个取值的群体个数
+    - title: 图表标题
+    - filename: 保存文件名
+    - num_dims: 维度数量
+    - dim_names: 维度名称列表
+    """
+    if not dim_value_counts or num_dims == 0:
+        return
+    
+    # 准备数据：每个维度有3个取值（0, 1, 2）
+    dim_indices = sorted(dim_value_counts.keys())
+    if not dim_indices:
+        return
+    
+    # 为每个维度分配不同的颜色
+    colors = plt.cm.tab20(np.linspace(0, 1, num_dims))
+    
+    # 为每个取值分配不同的图案
+    patterns = ['/', '\\', '|']  # 对应 0, 1, 2
+    
+    # 计算x轴位置
+    # 每个维度占据一个区间，每个取值在区间内
+    x_positions = []
+    x_labels = []
+    x_ticks = []  # x轴刻度位置
+    x_tick_labels = []  # x轴刻度标签
+    bar_width = 0.25  # 每个取值的柱宽
+    dim_spacing = 1.0  # 维度之间的间距
+    
+    current_x = 0
+    for dim_idx in dim_indices:
+        dim_name = dim_names[dim_idx] if dim_idx < len(dim_names) else f"维度{dim_idx+1}"
+        # 每个维度的三个取值位置
+        for val in [0, 1, 2]:
+            x_pos = current_x + (val - 1) * bar_width
+            x_positions.append(x_pos)
+            x_labels.append('')
+        # 维度标签位置在三个柱子的中间（即val=1的位置）
+        x_ticks.append(current_x)
+        x_tick_labels.append(dim_name)
+        current_x += dim_spacing
+    
+    # 准备柱状图数据
+    heights = []
+    bar_colors = []
+    bar_patterns = []
+    
+    for dim_idx in dim_indices:
+        counts = dim_value_counts[dim_idx]
+        for val in [0, 1, 2]:
+            count = counts.get(val, 0)
+            heights.append(count)
+            bar_colors.append(colors[dim_idx])
+            bar_patterns.append(patterns[val])
+    
+    # 绘制柱状图
+    fig, ax = plt.subplots(figsize=(max(12, len(dim_indices) * 1.5), 6))
+    bars = ax.bar(x_positions, heights, width=bar_width, color=bar_colors, edgecolor='black', linewidth=0.5)
+    
+    # 为每个柱子添加图案
+    for bar, pattern in zip(bars, bar_patterns):
+        bar.set_hatch(pattern)
+    
+    # 设置x轴标签（在每个维度的中间位置显示维度名称）
+    ax.set_xticks(x_ticks)
+    ax.set_xticklabels(x_tick_labels, rotation=45, ha='right')
+    
+    # 在每个维度取值柱子上方标注数值
+    for i, (x, h) in enumerate(zip(x_positions, heights)):
+        if h > 0:
+            ax.text(x, h, str(int(h)), ha='center', va='bottom', fontsize=8)
+    
+    # 添加图例
+    from matplotlib.patches import Rectangle
+    legend_elements = []
+    # 添加取值图例
+    for val, pattern in enumerate(patterns):
+        val_label = ['负价值(0)', '无价值(1)', '正价值(2)'][val]
+        legend_elements.append(Rectangle((0, 0), 1, 1, facecolor='gray', edgecolor='black', hatch=pattern, label=val_label))
+    
+    ax.legend(handles=legend_elements, loc='upper right')
+    
+    ax.set_ylabel('群体个数')
+    ax.set_title(title)
+    ax.grid(True, linestyle='--', alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+
 def plot_stacked_bar(distribution_data, title, filename):
     """
     绘制水平堆叠条形图
@@ -185,12 +279,27 @@ def _calc_group_proportion(proportion_estimate: list, dim_values_012: list[int])
     return float(prop)
 
 
-def plot_group_valuation_histogram(groups, title, filename, optimal_price: float):
+def _calc_group_importance(proportion: float, valuation: float, optimal_price: float, epsilon: float) -> float:
     """
-    群体估值“可变宽度柱状图”：
-    - groups: list of dict { 'valuation': float, 'proportion': float }
+    计算单个群体的重要性贡献: proportion / (|valuation - optimal_price| + epsilon)^2
+    注意：不包含p^2，p^2会在累加后统一乘以
+    """
+    if proportion <= 0 or epsilon <= 0:
+        return 0.0
+    diff = abs(valuation - optimal_price)
+    denominator = (diff + epsilon) ** 2
+    if denominator <= 0:
+        return 0.0
+    return proportion / denominator
+
+
+def plot_group_valuation_histogram(groups, title, filename, optimal_price: float, proportion_estimate=None, num_dims=None):
+    """
+    群体估值"可变宽度柱状图"：
+    - groups: list of dict { 'valuation': float, 'proportion': float, 'dim_code': str, 'uniq_id': str }
     - x轴为累计人群占比区间，柱宽∝群体占比，柱高=估值
     - valuation>=optimal_price -> 绿色，否则灰色
+    - 添加重要性折线（使用独立的y轴）
     """
     if not groups:
         return
@@ -206,21 +315,53 @@ def plot_group_valuation_histogram(groups, title, filename, optimal_price: float
         widths = np.ones_like(widths) / max(1, len(widths))
         total_w = float(widths.sum())
     else:
-        # 在“占比宽度”之外叠加基础宽度，再整体归一化
+        # 在"占比宽度"之外叠加基础宽度，再整体归一化
         widths = widths + base_width
         widths = widths / float(widths.sum())
 
     lefts = np.concatenate([[0.0], np.cumsum(widths)[:-1]])
     colors = ["#1a9850" if h >= float(optimal_price) else "#bdbdbd" for h in heights]
 
-    plt.figure(figsize=(12, 5))
-    plt.bar(lefts, heights, width=widths, align="edge", color=colors, edgecolor="white", linewidth=0.2)
-    plt.axhline(y=float(optimal_price), color="red", linestyle="--", linewidth=1.2, label="Optimal Price")
-    plt.title(title)
-    plt.xlabel("Cumulative Group Proportion")
-    plt.ylabel("Valuation (Psychological Price)")
-    plt.xlim(0, 1)
-    plt.grid(True, linestyle="--", alpha=0.5, axis="y")
+    # 创建图形和主坐标轴
+    fig, ax1 = plt.subplots(figsize=(12, 5))
+    
+    # 绘制柱状图
+    ax1.bar(lefts, heights, width=widths, align="edge", color=colors, edgecolor="white", linewidth=0.2)
+    ax1.axhline(y=float(optimal_price), color="red", linestyle="--", linewidth=1.2, label="Optimal Price")
+    ax1.set_xlabel("Cumulative Group Proportion")
+    ax1.set_ylabel("Valuation (Psychological Price)", color='black')
+    ax1.set_xlim(0, 1)
+    ax1.grid(True, linestyle="--", alpha=0.5, axis="y")
+    ax1.tick_params(axis='y', labelcolor='black')
+
+    # 计算并绘制重要性折线
+    if proportion_estimate is not None and num_dims is not None:
+        epsilon = optimal_price / 100.0 if optimal_price > 0 else 0.01
+        importance_values = []
+        centers = []
+        
+        for g, left, w in zip(groups, lefts, widths):
+            uniq_id = g.get("uniq_id", "")
+            if uniq_id:
+                dim_vals = _parse_group_dim_values_from_uniq_id(uniq_id, num_dims)
+                if dim_vals is not None:
+                    proportion = _calc_group_proportion(proportion_estimate, dim_vals)
+                    valuation = float(g.get("valuation", 0.0))
+                    # 计算重要性：p^2 * proportion / (|valuation - p| + epsilon)^2
+                    importance = _calc_group_importance(proportion, valuation, optimal_price, epsilon)
+                    importance = (optimal_price ** 2) * importance
+                    importance_values.append(importance)
+                    centers.append(left + w / 2.0)
+        
+        if importance_values:
+            # 创建第二个y轴用于重要性
+            ax2 = ax1.twinx()
+            ax2.plot(centers, importance_values, 'o-', color='blue', linewidth=2, markersize=4, label='Importance')
+            ax2.set_ylabel("Importance Score", color='blue')
+            ax2.tick_params(axis='y', labelcolor='blue')
+            ax2.grid(True, linestyle="--", alpha=0.3, axis="y")
+
+    ax1.set_title(title)
 
     # 标注：用连续的M个数字表示该群体取值（例如00120）
     max_h = float(np.max(heights)) if len(heights) else 0.0
@@ -231,7 +372,7 @@ def plot_group_valuation_histogram(groups, title, filename, optimal_price: float
             continue
         x = float(left) + float(w) / 2.0
         y = float(h) + y_offset
-        plt.text(x, y, code, rotation=45, ha="right", va="bottom", fontsize=6, color="black")
+        ax1.text(x, y, code, rotation=45, ha="right", va="bottom", fontsize=6, color="black")
 
     plt.tight_layout()
     plt.savefig(filename)
@@ -682,21 +823,23 @@ def analyze_consumer_data(input_file, output_file):
         f.write(f"- **无价值群体总准确率**: {global_stats[1]['correct']}/{global_stats[1]['total']} ({global_stats[1]['correct']/global_stats[1]['total']:.2%})\n")
         f.write(f"- **正价值群体总准确率**: {global_stats[2]['correct']}/{global_stats[2]['total']} ({global_stats[2]['correct']/global_stats[2]['total']:.2%})\n")
         f.write(f"- **总和准确率**: {total_correct_all}/{total_count_all} ({total_correct_all/total_count_all:.2%})\n\n")
-
         # β方向统计（分别+合并）
         f.write("### $\\beta$方向统计（双$\\beta$）\n\n")
         if beta_plus_total > 0:
             f.write(f"- **$\\beta^+$ 为正占比**: {beta_plus_pos}/{beta_plus_total} ({beta_plus_pos/beta_plus_total:.2%})；为负占比: {beta_plus_neg}/{beta_plus_total} ({beta_plus_neg/beta_plus_total:.2%})\n")
+            print(f"$\\beta^+$ 为正占比: {beta_plus_pos}/{beta_plus_total} ({beta_plus_pos/beta_plus_total:.2%})；为负占比: {beta_plus_neg}/{beta_plus_total} ({beta_plus_neg/beta_plus_total:.2%})")
         else:
             f.write("- **$\\beta^+$ 为正/负占比**: 无有效$\\beta^+$数据\n")
 
         if beta_minus_total > 0:
             f.write(f"- **$\\beta^-$ 为正占比**: {beta_minus_pos}/{beta_minus_total} ({beta_minus_pos/beta_minus_total:.2%})；为负占比: {beta_minus_neg}/{beta_minus_total} ({beta_minus_neg/beta_minus_total:.2%})\n")
+            print(f"$\\beta^-$ 为正占比: {beta_minus_pos}/{beta_minus_total} ({beta_minus_pos/beta_minus_total:.2%})；为负占比: {beta_minus_neg}/{beta_minus_total} ({beta_minus_neg/beta_minus_total:.2%})")
         else:
             f.write("- **$\\beta^-$ 为正/负占比**: 无有效$\\beta^-$数据\n")
 
         if beta_merged_total > 0:
             f.write(f"- **合并($\\beta^+$ 与 $\\beta^-$) 为正占比**: {beta_merged_pos}/{beta_merged_total} ({beta_merged_pos/beta_merged_total:.2%})；为负占比: {beta_merged_neg}/{beta_merged_total} ({beta_merged_neg/beta_merged_total:.2%})\n\n")
+            print(f"合并($\\beta^+$ 与 $\\beta^-$) 为正占比: {beta_merged_pos}/{beta_merged_total} ({beta_merged_pos/beta_merged_total:.2%})；为负占比: {beta_merged_neg}/{beta_merged_total} ({beta_merged_neg/beta_merged_total:.2%})")
         else:
             f.write("- **合并($\\beta^+$ 与 $\\beta^-$) 为正/负占比**: 无有效$\\beta$数据\n\n")
 
@@ -787,14 +930,127 @@ def analyze_consumer_data(input_file, output_file):
                 chart_filename = f"valuation_{data['product_uniq_id']}.png"
                 chart_path = os.path.join(img_dir, chart_filename)
                 plot_group_valuation_histogram(
-                    [{'valuation': g['valuation'], 'proportion': g['proportion'], 'dim_code': g.get('dim_code', '')} for g in groups_list],
+                    [{'valuation': g['valuation'], 'proportion': g['proportion'], 'dim_code': g.get('dim_code', ''), 'uniq_id': g.get('uniq_id', '')} for g in groups_list],
                     f"Group Valuations for {product_name}",
                     chart_path,
-                    optimal_price_val
+                    optimal_price_val,
+                    proportion_estimate=prop_est,
+                    num_dims=num_dims
                 )
                 f.write(f"![Group Valuations]({img_dir_name}/{chart_filename})\n\n")
             else:
                 f.write("> 无可用数据生成群体估值柱状图\n\n")
+            
+            # 用户统计：按估值分类统计维度取值分布
+            f.write("#### 用户群体维度取值分布统计\n\n")
+            # 确保groups_list已定义（如果之前没有计算，这里重新计算）
+            if users_data and isinstance(prop_est, list) and num_dims > 0 and optimal_price_val > 0:
+                # 如果groups_list未定义，重新计算
+                if 'groups_list' not in locals() or not groups_list:
+                    groups_dict = {}
+                    for user_row in users_data:
+                        gid = str(user_row.get('user_uniq_id') or user_row.get('uniq_id', ''))
+                        if gid not in groups_dict:
+                            groups_dict[gid] = []
+                        groups_dict[gid].append(user_row)
+                    
+                    groups_list = []
+                    for gid, user_rows in groups_dict.items():
+                        dim_vals = _parse_group_dim_values_from_uniq_id(gid, num_dims)
+                        if dim_vals is None:
+                            continue
+                        vals = [parse_price(row.get('psychological_price', '0')) for row in user_rows]
+                        valuation = float(np.mean(vals)) if vals else 0.0
+                        groups_list.append({'uniq_id': str(gid), 'valuation': valuation, 'dim_vals': dim_vals})
+                
+                # 将用户群体分为三类：高于、等于、低于最佳售价
+                groups_above = []  # 估值高于最佳售价
+                groups_equal = []  # 估值等于最佳售价
+                groups_below = []  # 估值低于最佳售价
+                
+                # 使用之前计算的groups_list
+                if groups_list:
+                    for group in groups_list:
+                        valuation = group['valuation']
+                        dim_vals = group.get('dim_vals')
+                        if dim_vals is None:
+                            continue
+                        
+                        # 判断估值与最佳售价的关系（允许小的误差）
+                        tolerance = 0.01  # 允许0.01的误差
+                        if abs(valuation - optimal_price_val) < tolerance:
+                            groups_equal.append(group)
+                        elif valuation > optimal_price_val:
+                            groups_above.append(group)
+                        else:
+                            groups_below.append(group)
+                    
+                    # 获取维度名称
+                    dims = data['segmentation_data'].get('segmentations', [])
+                    dim_names = [d.get('dimension_name', f'维度{i+1}') for i, d in enumerate(dims)]
+                    
+                    # 统计三类群体的维度取值分布
+                    def count_dim_values(groups):
+                        """统计群体列表中每个维度每个取值的群体个数"""
+                        counts = {}  # {dim_idx: {0: count, 1: count, 2: count}}
+                        for group in groups:
+                            dim_vals = group.get('dim_vals')
+                            if dim_vals is None:
+                                continue
+                            for dim_idx, val in enumerate(dim_vals):
+                                if dim_idx not in counts:
+                                    counts[dim_idx] = {0: 0, 1: 0, 2: 0}
+                                if val in [0, 1, 2]:
+                                    counts[dim_idx][val] = counts[dim_idx].get(val, 0) + 1
+                        return counts
+                    
+                    counts_above = count_dim_values(groups_above)
+                    counts_equal = count_dim_values(groups_equal)
+                    counts_below = count_dim_values(groups_below)
+                    
+                    # 绘制三个柱状图
+                    if counts_above:
+                        chart_filename_above = f"dim_dist_above_{data['product_uniq_id']}.png"
+                        chart_path_above = os.path.join(img_dir, chart_filename_above)
+                        plot_dimension_value_distribution(
+                            counts_above,
+                            f"{product_name} - 估值高于最佳售价群体的维度取值分布",
+                            chart_path_above,
+                            num_dims,
+                            dim_names
+                        )
+                        f.write("##### 估值高于最佳售价的群体\n\n")
+                        f.write(f"![Dimension Distribution Above]({img_dir_name}/{chart_filename_above})\n\n")
+                    
+                    if counts_equal:
+                        chart_filename_equal = f"dim_dist_equal_{data['product_uniq_id']}.png"
+                        chart_path_equal = os.path.join(img_dir, chart_filename_equal)
+                        plot_dimension_value_distribution(
+                            counts_equal,
+                            f"{product_name} - 估值等于最佳售价群体的维度取值分布",
+                            chart_path_equal,
+                            num_dims,
+                            dim_names
+                        )
+                        f.write("##### 估值等于最佳售价的群体\n\n")
+                        f.write(f"![Dimension Distribution Equal]({img_dir_name}/{chart_filename_equal})\n\n")
+                    
+                    if counts_below:
+                        chart_filename_below = f"dim_dist_below_{data['product_uniq_id']}.png"
+                        chart_path_below = os.path.join(img_dir, chart_filename_below)
+                        plot_dimension_value_distribution(
+                            counts_below,
+                            f"{product_name} - 估值低于最佳售价群体的维度取值分布",
+                            chart_path_below,
+                            num_dims,
+                            dim_names
+                        )
+                        f.write("##### 估值低于最佳售价的群体\n\n")
+                        f.write(f"![Dimension Distribution Below]({img_dir_name}/{chart_filename_below})\n\n")
+                else:
+                    f.write("> 无可用数据生成维度取值分布统计图\n\n")
+            else:
+                f.write("> 无可用数据生成维度取值分布统计图\n\n")
             
             # 属性统计表格
             f.write("#### 属性统计总表\n\n")
@@ -918,7 +1174,7 @@ def analyze_consumer_data(input_file, output_file):
             users_list = safe_json_loads(row.get('users_data', '[]'))
             if not isinstance(users_list, list):
                 users_list = []
-            num_dims = len(data.get('beta_plus', []) or [])
+                num_dims = len(data.get('beta_plus', []) or [])
             prop_est = data.get('proportion_estimate')
             
             if not center_ids:
@@ -1091,9 +1347,6 @@ def analyze_consumer_data(input_file, output_file):
                 
                 # 选项1：对负价值群体减少负面影响
                 if dim_prop[0] > 0 and has_neg[dim_idx] if dim_idx < len(has_neg) else False:
-                    # 重要性 = 负价值群体占比 * β^-值（使用绝对值用于排序）
-                    importance = dim_prop[0] * abs(beta_minus_val)
-                    
                     # 根据属性方向调整显示的优化方向
                     if attr_direction == '正向':
                         opt_direction = '对负价值群体减少负面影响'
@@ -1106,7 +1359,7 @@ def analyze_consumer_data(input_file, output_file):
                     optimization_options.append({
                         'attr_name': attr_name,
                         'direction': opt_direction,
-                        'importance': importance,
+                        'importance': 0.0,  # 稍后计算
                         'effect': attr_effect,
                         'criteria': opt_criteria,
                         'dim_idx': dim_idx,
@@ -1117,45 +1370,23 @@ def analyze_consumer_data(input_file, output_file):
                 
                 # 选项2：对无价值群体增强吸引力
                 if dim_prop[1] > 0:
-                    # 判断三个取值是否均不为空
-                    has_all = (has_neg[dim_idx] if dim_idx < len(has_neg) else False) and \
-                              (has_pos[dim_idx] if dim_idx < len(has_pos) else False)
+                    opt_direction = '对无价值群体增强吸引力'
+                    opt_criteria = neu_criteria
                     
-                    if has_all:
-                        # 三个取值均不为空：使用平均值
-                        beta_avg = (beta_plus_val + beta_minus_val) / 2.0
-                        importance = dim_prop[1] * abs(beta_avg)
-                        beta_used = beta_avg
-                    else:
-                        # 只有一个不为空：使用不为0的那个beta值
-                        if has_neg[dim_idx] if dim_idx < len(has_neg) else False and abs(beta_minus_val) > 1e-12:
-                            importance = dim_prop[1] * abs(beta_minus_val)
-                            beta_used = beta_minus_val
-                        elif has_pos[dim_idx] if dim_idx < len(has_pos) else False and abs(beta_plus_val) > 1e-12:
-                            importance = dim_prop[1] * abs(beta_plus_val)
-                            beta_used = beta_plus_val
-                        else:
-                            importance = 0.0
-                            beta_used = 0.0
-                    
-                    if importance > 0:
-                        optimization_options.append({
-                            'attr_name': attr_name,
-                            'direction': '对无价值群体增强吸引力',
-                            'importance': importance,
-                            'effect': attr_effect,
-                            'criteria': neu_criteria,
-                            'dim_idx': dim_idx,
-                            'dim_val': 1,  # 无价值群体对应的维度取值
-                            'beta_value': beta_used,  # 保存使用的beta值用于显示
-                            'group_proportion': dim_prop[1]  # 保存群体占比
-                        })
+                    optimization_options.append({
+                        'attr_name': attr_name,
+                        'direction': opt_direction,
+                        'importance': 0.0,  # 稍后计算
+                        'effect': attr_effect,
+                        'criteria': opt_criteria,
+                        'dim_idx': dim_idx,
+                        'dim_val': 1,  # 无价值群体对应的维度取值
+                        'beta_value': (beta_plus_val + beta_minus_val) / 2.0 if (has_neg[dim_idx] if dim_idx < len(has_neg) else False) and (has_pos[dim_idx] if dim_idx < len(has_pos) else False) else (beta_minus_val if (has_neg[dim_idx] if dim_idx < len(has_neg) else False) else beta_plus_val),
+                        'group_proportion': dim_prop[1]
+                    })
                 
                 # 选项3：对正价值群体提高满意度
                 if dim_prop[2] > 0 and has_pos[dim_idx] if dim_idx < len(has_pos) else False:
-                    # 重要性 = 正价值群体占比 * β^+值（使用绝对值用于排序）
-                    importance = dim_prop[2] * abs(beta_plus_val)
-                    
                     # 根据属性方向调整显示的优化方向
                     if attr_direction == '正向':
                         opt_direction = '对正价值群体提高满意度'
@@ -1168,7 +1399,7 @@ def analyze_consumer_data(input_file, output_file):
                     optimization_options.append({
                         'attr_name': attr_name,
                         'direction': opt_direction,
-                        'importance': importance,
+                        'importance': 0.0,  # 稍后计算
                         'effect': attr_effect,
                         'criteria': opt_criteria,
                         'dim_idx': dim_idx,
@@ -1177,106 +1408,143 @@ def analyze_consumer_data(input_file, output_file):
                         'group_proportion': dim_prop[2]
                     })
             
+            # 计算每个优化选项的重要性指标和参考消费者
+            optimal_price_val = float(data.get('optimal_price') or 0.0)
+            epsilon = optimal_price_val / 100.0 if optimal_price_val > 0 else 0.01
+            
+            for opt in optimization_options:
+                dim_idx = opt['dim_idx']
+                dim_val = opt['dim_val']
+                attr_name = opt['attr_name']
+                
+                # 找到所有匹配的群体
+                matching_groups = []
+                for user_row in users_list_opt:
+                    gid = str(user_row.get('user_uniq_id', ''))
+                    group_dim_vals = _parse_group_dim_values_from_uniq_id(gid, num_dims)
+                    if group_dim_vals is not None and dim_idx < len(group_dim_vals):
+                        if group_dim_vals[dim_idx] == dim_val:
+                            price_str = user_row.get('psychological_price', '0')
+                            valuation = parse_price(price_str)
+                            
+                            # 计算群体占比
+                            group_proportion = _calc_group_proportion(prop_est, group_dim_vals)
+                            
+                            # 获取该群体对该属性的分析
+                            aa = user_row.get('attribute_analysis')
+                            if isinstance(aa, str):
+                                aa = safe_json_loads(aa)
+                            elif not isinstance(aa, list):
+                                aa = safe_json_loads(str(aa)) if aa else []
+                            
+                            attr_score = None
+                            attr_effect = None
+                            attr_suggestion = ""
+                            if isinstance(aa, list):
+                                for item in aa:
+                                    if isinstance(item, dict) and item.get('attribute_name') == attr_name:
+                                        attr_score = item.get('attribute_score')
+                                        attr_effect = item.get('attribute_effect')
+                                        attr_suggestion = item.get('attribute_optimization_suggestion', '')
+                                        break
+                            
+                            # 只包含有建议的群体（建议不为空）
+                            if attr_suggestion and attr_suggestion.strip():
+                                # 计算群体重要性
+                                group_importance = _calc_group_importance(group_proportion, valuation, optimal_price_val, epsilon)
+                                
+                                matching_groups.append({
+                                    'gid': gid,
+                                    'valuation': valuation,
+                                    'proportion': group_proportion,
+                                    'attr_score': attr_score,
+                                    'attr_effect': attr_effect,
+                                    'attr_suggestion': attr_suggestion,
+                                    'user_row': user_row,
+                                    'importance': group_importance
+                                })
+                
+                # 计算重要性指标：I = p^2 * sum(proportion / (|valuation - p| + epsilon)^2)
+                importance = 0.0
+                for group in matching_groups:
+                    importance += _calc_group_importance(group['proportion'], group['valuation'], optimal_price_val, epsilon)
+                importance = (optimal_price_val ** 2) * importance  # 乘以p^2
+                opt['importance'] = importance
+                
+                # 按群体重要性降序排序，取前5个
+                matching_groups.sort(key=lambda g: g['importance'], reverse=True)
+                top_groups = matching_groups[:5]
+                
+                # 构建参考消费者列表
+                reference_consumers = []
+                for group in top_groups:
+                    reference_consumers.append({
+                        'gid': group['gid'],
+                        'profile': str(group['user_row'].get('user_profile', '（无）')),
+                        'proportion': group['proportion'],
+                        'effect': str(group.get('attr_effect', '（无）')),
+                        'score': str(group['attr_score']) if group['attr_score'] is not None else '（无）',
+                        'suggestion': group['attr_suggestion'],
+                        'valuation': f"{group['valuation']:.2f}"
+                    })
+                
+                # 补充到5个（如果不足）
+                while len(reference_consumers) < 5:
+                    reference_consumers.append({
+                        'gid': '（空）',
+                        'profile': '（空）',
+                        'proportion': '（空）',
+                        'effect': '（空）',
+                        'score': '（空）',
+                        'suggestion': '（空）',
+                        'valuation': '（空）'
+                    })
+                
+                opt['reference_consumers'] = reference_consumers
+                opt['consumer_proportion'] = sum(g['proportion'] for g in matching_groups)
+            
             # 按重要性降序排序
             optimization_options.sort(key=lambda x: x['importance'], reverse=True)
             
             # 生成表格
             if optimization_options:
-                f.write("| 优先级 | 属性名称+优化方向 | 当前表现 | 用户群体判定标准 | β值 | 群体占比 | 重要性分数 | 参考优化建议 | 用户群体ID | 用户画像 | 用户打分 | 产品估值 |\n")
-                f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+                # 表头：基础列 + 5个消费者 * 6个字段
+                f.write("| 优先级 | 属性名称+优化方向 | 当前表现 | 用户群体判定标准 | 群体占比 | 重要性分数 |")
+                for i in range(1, 6):
+                    f.write(f" 消费者{i}画像 | 消费者{i}占比 | 消费者{i}效果 | 消费者{i}打分 | 消费者{i}建议 | 消费者{i}估值 |")
+                f.write("\n")
+                f.write("| :--- | :--- | :--- | :--- | :--- | :--- |")
+                for i in range(5):
+                    f.write(" :--- | :--- | :--- | :--- | :--- | :--- |")
+                f.write("\n")
+                
                 for idx, opt in enumerate(optimization_options, 1):
                     attr_name = opt['attr_name']
                     direction = opt['direction']
                     effect = opt['effect'] or '（无描述）'
                     criteria = opt['criteria'] or '（无标准）'
                     importance = opt['importance']
-                    beta_value = opt.get('beta_value', 0.0)
-                    group_proportion = opt.get('group_proportion', 0.0)
-                    dim_idx = opt['dim_idx']
-                    dim_val = opt['dim_val']  # 0, 1, 或 2
+                    consumer_proportion = opt.get('consumer_proportion', 0.0)
+                    reference_consumers = opt.get('reference_consumers', [])
                     
-                    # 查找参考优化建议
-                    reference_suggestion = "（无参考建议）"
-                    reference_gid = "（无）"
-                    reference_profile = "（无）"
-                    reference_score = "（无）"
-                    reference_valuation = "（无）"
+                    # 限制文本长度
+                    effect_short = effect[:60] + '...' if len(effect) > 60 else effect
+                    criteria_short = criteria[:60] + '...' if len(criteria) > 60 else criteria
                     
-                    # 找到与该优化建议所属的维度和维度取值一致的用户群体
-                    matching_groups = []
-                    for user_row in users_list_opt:
-                        gid = str(user_row.get('user_uniq_id', ''))
-                        group_dim_vals = _parse_group_dim_values_from_uniq_id(gid, num_dims)
-                        if group_dim_vals is not None and dim_idx < len(group_dim_vals):
-                            # 检查该群体在该维度上的取值是否匹配
-                            if group_dim_vals[dim_idx] == dim_val:
-                                # 获取该群体的估值（从当前行的psychological_price获取）
-                                price_str = user_row.get('psychological_price', '0')
-                                valuation = parse_price(price_str)
-                                
-                                # 获取该群体对该属性的打分
-                                aa = user_row.get('attribute_analysis')
-                                if isinstance(aa, str):
-                                    aa = safe_json_loads(aa)
-                                elif not isinstance(aa, list):
-                                    aa = safe_json_loads(str(aa)) if aa else []
-                                
-                                attr_score = None
-                                if isinstance(aa, list):
-                                    for item in aa:
-                                        if isinstance(item, dict) and item.get('attribute_name') == attr_name:
-                                            attr_score = item.get('attribute_score')
-                                            break
-                                
-                                if attr_score is not None:
-                                    matching_groups.append({
-                                        'gid': gid,
-                                        'valuation': valuation,
-                                        'attr_score': attr_score,
-                                        'row': user_row
-                                    })
+                    f.write(f"| {idx} | {attr_name} - {direction} | {effect_short} | {criteria_short} | {consumer_proportion:.6f} | {importance:.6f} |")
                     
-                    # 对匹配的群体进行排序
-                    if matching_groups:
-                        # 主标准：群体估值与最优定价的距离升序
-                        # 副标准：群体对该属性的打分升序
-                        optimal_price_val = float(data.get('optimal_price') or 0.0)
-                        matching_groups.sort(key=lambda g: (
-                            abs(g['valuation'] - optimal_price_val),  # 主标准：与最优定价的距离
-                            g['attr_score']  # 副标准：属性打分升序
-                        ))
+                    # 写入5个消费者的信息
+                    for consumer in reference_consumers[:5]:
+                        profile_short = consumer.get('profile', '（空）')[:40] + '...' if len(consumer.get('profile', '')) > 40 else consumer.get('profile', '（空）')
+                        proportion_str = f"{consumer.get('proportion', 0.0):.6f}" if isinstance(consumer.get('proportion'), (int, float)) else str(consumer.get('proportion', '（空）'))
+                        effect_short_consumer = consumer.get('effect', '（空）')[:40] + '...' if len(consumer.get('effect', '')) > 40 else consumer.get('effect', '（空）')
+                        score_str = str(consumer.get('score', '（空）'))
+                        suggestion_short = consumer.get('suggestion', '（空）')[:60] + '...' if len(consumer.get('suggestion', '')) > 60 else consumer.get('suggestion', '（空）')
+                        valuation_str = str(consumer.get('valuation', '（空）'))
                         
-                        # 取排第一的群体对该属性的优化建议
-                        top_group = matching_groups[0]
-                        top_row = top_group['row']
-                        reference_gid = top_group['gid']
-                        reference_score = str(top_group['attr_score'])
-                        reference_valuation = f"{top_group['valuation']:.2f}"
-                        
-                        # 获取用户画像
-                        user_profile = top_row.get('user_profile', '')
-                        if user_profile:
-                            reference_profile = str(user_profile)
-                        else:
-                            reference_profile = "（无）"
-                        
-                        # 获取优化建议
-                        top_aa = safe_json_loads(top_row.get('attribute_analysis'))
-                        if isinstance(top_aa, list):
-                            for item in top_aa:
-                                if isinstance(item, dict) and item.get('attribute_name') == attr_name:
-                                    ref_sug = item.get('attribute_optimization_suggestion', '')
-                                    if ref_sug:
-                                        reference_suggestion = ref_sug
-                                    break
+                        f.write(f" {profile_short} | {proportion_str} | {effect_short_consumer} | {score_str} | {suggestion_short} | {valuation_str} |")
                     
-                    # 限制文本长度，避免表格过宽
-                    effect_short = effect[:80] + '...' if len(effect) > 80 else effect
-                    criteria_short = criteria[:80] + '...' if len(criteria) > 80 else criteria
-                    ref_sug_short = reference_suggestion[:100] + '...' if len(reference_suggestion) > 100 else reference_suggestion
-                    profile_short = reference_profile[:100] + '...' if len(reference_profile) > 100 else reference_profile
-                    
-                    f.write(f"| {idx} | {attr_name} - {direction} | {effect_short} | {criteria_short} | {beta_value:.4f} | {group_proportion:.4f} | {importance:.6f} | {ref_sug_short} | {reference_gid} | {profile_short} | {reference_score} | {reference_valuation} |\n")
+                    f.write("\n")
                 f.write("\n")
             else:
                 f.write("> 无可用优化选项\n\n")
@@ -1296,7 +1564,7 @@ if __name__ == "__main__":
 
     input_csv = args.input
     output_md = args.output
-
+    
     if os.path.exists(input_csv):
         analyze_consumer_data(input_csv, output_md)
     else:

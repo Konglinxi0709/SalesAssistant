@@ -75,6 +75,20 @@ def parse_price(price_str):
         return 1.0
 
 
+def _calc_group_importance(proportion: float, valuation: float, optimal_price: float, epsilon: float) -> float:
+    """
+    计算单个群体的重要性贡献: proportion / (|valuation - optimal_price| + epsilon)^2
+    注意：不包含p^2，p^2会在累加后统一乘以
+    """
+    if proportion <= 0 or epsilon <= 0:
+        return 0.0
+    diff = abs(valuation - optimal_price)
+    denominator = (diff + epsilon) ** 2
+    if denominator <= 0:
+        return 0.0
+    return proportion / denominator
+
+
 def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
     """
     为单个产品生成属性优化优先顺序表
@@ -88,6 +102,7 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
     segmentation = safe_json_loads(product_row.get('segmentation_result'))
     users_data = safe_json_loads(product_row.get('users_data', '[]'))
     optimal_price = float(product_row.get('optimal_price', 0.0))
+    epsilon = optimal_price / 100.0 if optimal_price > 0 else 0.01  # epsilon = p/100
     
     if not isinstance(users_data, list):
         users_data = []
@@ -169,7 +184,7 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
         dim_prop = dim_proportions.get(dim_idx, {0: 0.0, 1: 0.0, 2: 0.0})
         
         # 获取该属性的当前表现
-        attr_effect = attr_desc_map.get(attr_name, '（无描述）')
+        current_performance = attr_desc_map.get(attr_name, '（无描述）')
         attr_direction = attr_info.get('direction', '正向')
         
         # 获取维度判定标准
@@ -180,8 +195,6 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
         
         # 选项1：对负价值群体减少负面影响
         if dim_prop[0] > 0 and has_neg[dim_idx] if dim_idx < len(has_neg) else False:
-            importance = dim_prop[0] * abs(beta_minus_val)
-            
             if attr_direction == '正向':
                 opt_direction = '对负价值群体减少负面影响'
                 opt_criteria = neg_criteria
@@ -189,7 +202,7 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
                 opt_direction = '对正价值群体提高满意度'
                 opt_criteria = pos_criteria
             
-            # 查找参考优化建议
+            # 查找所有匹配的群体（该维度取值为0的群体）
             matching_groups = []
             for user_row in users_data:
                 gid = str(user_row.get('user_uniq_id', ''))
@@ -199,6 +212,9 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
                         price_str = user_row.get('psychological_price', '0')
                         valuation = parse_price(price_str)
                         
+                        # 计算群体占比
+                        group_proportion = _calc_group_proportion(prop_est, group_dim_vals)
+                        
                         aa = user_row.get('attribute_analysis')
                         if isinstance(aa, str):
                             aa = safe_json_loads(aa)
@@ -206,167 +222,159 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
                             aa = safe_json_loads(str(aa)) if aa else []
                         
                         attr_score = None
+                        attr_effect = None
+                        attr_suggestion = ""
                         if isinstance(aa, list):
                             for item in aa:
                                 if isinstance(item, dict) and item.get('attribute_name') == attr_name:
                                     attr_score = item.get('attribute_score')
+                                    attr_effect = item.get('attribute_effect')
+                                    attr_suggestion = item.get('attribute_optimization_suggestion', '')
                                     break
                         
-                        if attr_score is not None:
+                        # 只包含有建议的群体（建议不为空）
+                        if attr_suggestion and attr_suggestion.strip():
+                            # 计算群体重要性
+                            group_importance = _calc_group_importance(group_proportion, valuation, optimal_price, epsilon)
+                            
                             matching_groups.append({
                                 'gid': gid,
                                 'valuation': valuation,
+                                'proportion': group_proportion,
                                 'attr_score': attr_score,
-                                'user_row': user_row
+                                'attr_effect': attr_effect,
+                                'attr_suggestion': attr_suggestion,
+                                'user_row': user_row,
+                                'importance': group_importance
                             })
             
-            # 排序并取第一个
-            reference_suggestion = "（无参考建议）"
-            reference_gid = "（无）"
-            reference_profile = "（无）"
-            reference_score = "（无）"
-            reference_valuation = "（无）"
+            # 计算重要性指标：I = p^2 * sum(proportion / (|valuation - p| + epsilon)^2)
+            importance = 0.0
+            for group in matching_groups:
+                importance += _calc_group_importance(group['proportion'], group['valuation'], optimal_price, epsilon)
+            importance = (optimal_price ** 2) * importance  # 乘以p^2
             
-            if matching_groups:
-                matching_groups.sort(key=lambda g: (
-                    abs(g['valuation'] - optimal_price),
-                    g['attr_score']
-                ))
-                top_group = matching_groups[0]
-                reference_gid = top_group['gid']
-                reference_score = str(top_group['attr_score'])
-                reference_valuation = f"{top_group['valuation']:.2f}"
-                reference_profile = str(top_group['user_row'].get('user_profile', '（无）'))
-                
-                top_aa = top_group['user_row'].get('attribute_analysis')
-                if isinstance(top_aa, str):
-                    top_aa = safe_json_loads(top_aa)
-                elif not isinstance(top_aa, list):
-                    top_aa = safe_json_loads(str(top_aa)) if top_aa else []
-                
-                if isinstance(top_aa, list):
-                    for item in top_aa:
-                        if isinstance(item, dict) and item.get('attribute_name') == attr_name:
-                            ref_sug = item.get('attribute_optimization_suggestion', '')
-                            if ref_sug:
-                                reference_suggestion = ref_sug
-                            break
+            # 按群体重要性降序排序，取前5个
+            matching_groups.sort(key=lambda g: g['importance'], reverse=True)
+            top_groups = matching_groups[:5]
+            
+            # 构建参考消费者列表
+            reference_consumers = []
+            for group in top_groups:
+                reference_consumers.append({
+                    'gid': group['gid'],
+                    'profile': str(group['user_row'].get('user_profile', '（无）')),
+                    'proportion': group['proportion'],
+                    'effect': str(group.get('attr_effect', '（无）')),
+                    'score': str(group['attr_score']) if group['attr_score'] is not None else '（无）',
+                    'suggestion': group['attr_suggestion'],
+                    'valuation': f"{group['valuation']:.2f}"
+                })
+            
+            # 计算该优化方向对应的消费者群体占比（所有匹配群体的占比之和）
+            consumer_proportion = sum(g['proportion'] for g in matching_groups)
             
             optimization_options.append({
                 'priority': 0,  # 稍后排序
                 'attr_name': attr_name,
                 'direction': opt_direction,
-                'current_performance': attr_effect,
+                'current_performance': current_performance,
                 'user_criteria': opt_criteria,
                 'importance_score': importance,
-                'reference_suggestion': reference_suggestion,
-                'reference_gid': reference_gid,
-                'reference_user_profile': reference_profile,
-                'reference_score': reference_score,
-                'reference_valuation': reference_valuation
+                'consumer_proportion': consumer_proportion,
+                'reference_consumers': reference_consumers
             })
         
         # 选项2：对无价值群体增强吸引力
         if dim_prop[1] > 0:
-            has_all = (has_neg[dim_idx] if dim_idx < len(has_neg) else False) and \
-                      (has_pos[dim_idx] if dim_idx < len(has_pos) else False)
+            opt_direction = '对无价值群体增强吸引力'
+            opt_criteria = neu_criteria
             
-            if has_all:
-                beta_avg = (beta_plus_val + beta_minus_val) / 2.0
-                importance = dim_prop[1] * abs(beta_avg)
-                beta_used = beta_avg
-            else:
-                if has_neg[dim_idx] if dim_idx < len(has_neg) else False and abs(beta_minus_val) > 1e-12:
-                    importance = dim_prop[1] * abs(beta_minus_val)
-                    beta_used = beta_minus_val
-                elif has_pos[dim_idx] if dim_idx < len(has_pos) else False and abs(beta_plus_val) > 1e-12:
-                    importance = dim_prop[1] * abs(beta_plus_val)
-                    beta_used = beta_plus_val
-                else:
-                    importance = 0.0
-                    beta_used = 0.0
+            # 查找所有匹配的群体（该维度取值为1的群体）
+            matching_groups = []
+            for user_row in users_data:
+                gid = str(user_row.get('user_uniq_id', ''))
+                group_dim_vals = _parse_group_dim_values_from_uniq_id(gid, num_dims)
+                if group_dim_vals is not None and dim_idx < len(group_dim_vals):
+                    if group_dim_vals[dim_idx] == 1:  # 无价值
+                        price_str = user_row.get('psychological_price', '0')
+                        valuation = parse_price(price_str)
+                        
+                        # 计算群体占比
+                        group_proportion = _calc_group_proportion(prop_est, group_dim_vals)
+                        
+                        aa = user_row.get('attribute_analysis')
+                        if isinstance(aa, str):
+                            aa = safe_json_loads(aa)
+                        elif not isinstance(aa, list):
+                            aa = safe_json_loads(str(aa)) if aa else []
+                        
+                        attr_score = None
+                        attr_effect = None
+                        attr_suggestion = ""
+                        if isinstance(aa, list):
+                            for item in aa:
+                                if isinstance(item, dict) and item.get('attribute_name') == attr_name:
+                                    attr_score = item.get('attribute_score')
+                                    attr_effect = item.get('attribute_effect')
+                                    attr_suggestion = item.get('attribute_optimization_suggestion', '')
+                                    break
+                        
+                        # 只包含有建议的群体（建议不为空）
+                        if attr_suggestion and attr_suggestion.strip():
+                            # 计算群体重要性
+                            group_importance = _calc_group_importance(group_proportion, valuation, optimal_price, epsilon)
+                            
+                            matching_groups.append({
+                                'gid': gid,
+                                'valuation': valuation,
+                                'proportion': group_proportion,
+                                'attr_score': attr_score,
+                                'attr_effect': attr_effect,
+                                'attr_suggestion': attr_suggestion,
+                                'user_row': user_row,
+                                'importance': group_importance
+                            })
             
-            if importance > 0:
-                # 查找参考优化建议（类似上面的逻辑，但dim_val=1）
-                matching_groups = []
-                for user_row in users_data:
-                    gid = str(user_row.get('user_uniq_id', ''))
-                    group_dim_vals = _parse_group_dim_values_from_uniq_id(gid, num_dims)
-                    if group_dim_vals is not None and dim_idx < len(group_dim_vals):
-                        if group_dim_vals[dim_idx] == 1:  # 无价值
-                            price_str = user_row.get('psychological_price', '0')
-                            valuation = parse_price(price_str)
-                            
-                            aa = user_row.get('attribute_analysis')
-                            if isinstance(aa, str):
-                                aa = safe_json_loads(aa)
-                            elif not isinstance(aa, list):
-                                aa = safe_json_loads(str(aa)) if aa else []
-                            
-                            attr_score = None
-                            if isinstance(aa, list):
-                                for item in aa:
-                                    if isinstance(item, dict) and item.get('attribute_name') == attr_name:
-                                        attr_score = item.get('attribute_score')
-                                        break
-                            
-                            if attr_score is not None:
-                                matching_groups.append({
-                                    'gid': gid,
-                                    'valuation': valuation,
-                                    'attr_score': attr_score,
-                                    'user_row': user_row
-                                })
-                
-                reference_suggestion = "（无参考建议）"
-                reference_gid = "（无）"
-                reference_profile = "（无）"
-                reference_score = "（无）"
-                reference_valuation = "（无）"
-                
-                if matching_groups:
-                    matching_groups.sort(key=lambda g: (
-                        abs(g['valuation'] - optimal_price),
-                        g['attr_score']
-                    ))
-                    top_group = matching_groups[0]
-                    reference_gid = top_group['gid']
-                    reference_score = str(top_group['attr_score'])
-                    reference_valuation = f"{top_group['valuation']:.2f}"
-                    reference_profile = str(top_group['user_row'].get('user_profile', '（无）'))
-                    
-                    top_aa = top_group['user_row'].get('attribute_analysis')
-                    if isinstance(top_aa, str):
-                        top_aa = safe_json_loads(top_aa)
-                    elif not isinstance(top_aa, list):
-                        top_aa = safe_json_loads(str(top_aa)) if top_aa else []
-                    
-                    if isinstance(top_aa, list):
-                        for item in top_aa:
-                            if isinstance(item, dict) and item.get('attribute_name') == attr_name:
-                                ref_sug = item.get('attribute_optimization_suggestion', '')
-                                if ref_sug:
-                                    reference_suggestion = ref_sug
-                                break
-                
-                optimization_options.append({
-                    'priority': 0,
-                    'attr_name': attr_name,
-                    'direction': '对无价值群体增强吸引力',
-                    'current_performance': attr_effect,
-                    'user_criteria': neu_criteria,
-                    'importance_score': importance,
-                    'reference_suggestion': reference_suggestion,
-                    'reference_gid': reference_gid,
-                    'reference_user_profile': reference_profile,
-                    'reference_score': reference_score,
-                    'reference_valuation': reference_valuation
+            # 计算重要性指标：I = p^2 * sum(proportion / (|valuation - p| + epsilon)^2)
+            importance = 0.0
+            for group in matching_groups:
+                importance += _calc_group_importance(group['proportion'], group['valuation'], optimal_price, epsilon)
+            importance = (optimal_price ** 2) * importance  # 乘以p^2
+            
+            # 按群体重要性降序排序，取前5个
+            matching_groups.sort(key=lambda g: g['importance'], reverse=True)
+            top_groups = matching_groups[:5]
+            
+            # 构建参考消费者列表
+            reference_consumers = []
+            for group in top_groups:
+                reference_consumers.append({
+                    'gid': group['gid'],
+                    'profile': str(group['user_row'].get('user_profile', '（无）')),
+                    'proportion': group['proportion'],
+                    'effect': str(group.get('attr_effect', '（无）')),
+                    'score': str(group['attr_score']) if group['attr_score'] is not None else '（无）',
+                    'suggestion': group['attr_suggestion'],
+                    'valuation': f"{group['valuation']:.2f}"
                 })
+            
+            # 计算该优化方向对应的消费者群体占比（所有匹配群体的占比之和）
+            consumer_proportion = sum(g['proportion'] for g in matching_groups)
+            
+            optimization_options.append({
+                'priority': 0,
+                'attr_name': attr_name,
+                'direction': opt_direction,
+                'current_performance': current_performance,
+                'user_criteria': opt_criteria,
+                'importance_score': importance,
+                'consumer_proportion': consumer_proportion,
+                'reference_consumers': reference_consumers
+            })
         
         # 选项3：对正价值群体提高满意度
         if dim_prop[2] > 0 and has_pos[dim_idx] if dim_idx < len(has_pos) else False:
-            importance = dim_prop[2] * abs(beta_plus_val)
-            
             if attr_direction == '正向':
                 opt_direction = '对正价值群体提高满意度'
                 opt_criteria = pos_criteria
@@ -374,7 +382,7 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
                 opt_direction = '对负价值群体减少负面影响'
                 opt_criteria = neg_criteria
             
-            # 查找参考优化建议（类似上面的逻辑，但dim_val=2）
+            # 查找所有匹配的群体（该维度取值为2的群体）
             matching_groups = []
             for user_row in users_data:
                 gid = str(user_row.get('user_uniq_id', ''))
@@ -384,6 +392,9 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
                         price_str = user_row.get('psychological_price', '0')
                         valuation = parse_price(price_str)
                         
+                        # 计算群体占比
+                        group_proportion = _calc_group_proportion(prop_est, group_dim_vals)
+                        
                         aa = user_row.get('attribute_analysis')
                         if isinstance(aa, str):
                             aa = safe_json_loads(aa)
@@ -391,63 +402,67 @@ def generate_optimization_table(product_row: pd.Series) -> List[Dict[str, Any]]:
                             aa = safe_json_loads(str(aa)) if aa else []
                         
                         attr_score = None
+                        attr_effect = None
+                        attr_suggestion = ""
                         if isinstance(aa, list):
                             for item in aa:
                                 if isinstance(item, dict) and item.get('attribute_name') == attr_name:
                                     attr_score = item.get('attribute_score')
+                                    attr_effect = item.get('attribute_effect')
+                                    attr_suggestion = item.get('attribute_optimization_suggestion', '')
                                     break
                         
-                        if attr_score is not None:
+                        # 只包含有建议的群体（建议不为空）
+                        if attr_suggestion and attr_suggestion.strip():
+                            # 计算群体重要性
+                            group_importance = _calc_group_importance(group_proportion, valuation, optimal_price, epsilon)
+                            
                             matching_groups.append({
                                 'gid': gid,
                                 'valuation': valuation,
+                                'proportion': group_proportion,
                                 'attr_score': attr_score,
-                                'user_row': user_row
+                                'attr_effect': attr_effect,
+                                'attr_suggestion': attr_suggestion,
+                                'user_row': user_row,
+                                'importance': group_importance
                             })
             
-            reference_suggestion = "（无参考建议）"
-            reference_gid = "（无）"
-            reference_profile = "（无）"
-            reference_score = "（无）"
-            reference_valuation = "（无）"
+            # 计算重要性指标：I = p^2 * sum(proportion / (|valuation - p| + epsilon)^2)
+            importance = 0.0
+            for group in matching_groups:
+                importance += _calc_group_importance(group['proportion'], group['valuation'], optimal_price, epsilon)
+            importance = (optimal_price ** 2) * importance  # 乘以p^2
             
-            if matching_groups:
-                matching_groups.sort(key=lambda g: (
-                    abs(g['valuation'] - optimal_price),
-                    g['attr_score']
-                ))
-                top_group = matching_groups[0]
-                reference_gid = top_group['gid']
-                reference_score = str(top_group['attr_score'])
-                reference_valuation = f"{top_group['valuation']:.2f}"
-                reference_profile = str(top_group['user_row'].get('user_profile', '（无）'))
-                
-                top_aa = top_group['user_row'].get('attribute_analysis')
-                if isinstance(top_aa, str):
-                    top_aa = safe_json_loads(top_aa)
-                elif not isinstance(top_aa, list):
-                    top_aa = safe_json_loads(str(top_aa)) if top_aa else []
-                
-                if isinstance(top_aa, list):
-                    for item in top_aa:
-                        if isinstance(item, dict) and item.get('attribute_name') == attr_name:
-                            ref_sug = item.get('attribute_optimization_suggestion', '')
-                            if ref_sug:
-                                reference_suggestion = ref_sug
-                            break
+            # 按群体重要性降序排序，取前5个
+            matching_groups.sort(key=lambda g: g['importance'], reverse=True)
+            top_groups = matching_groups[:5]
+            
+            # 构建参考消费者列表
+            reference_consumers = []
+            for group in top_groups:
+                reference_consumers.append({
+                    'gid': group['gid'],
+                    'profile': str(group['user_row'].get('user_profile', '（无）')),
+                    'proportion': group['proportion'],
+                    'effect': str(group.get('attr_effect', '（无）')),
+                    'score': str(group['attr_score']) if group['attr_score'] is not None else '（无）',
+                    'suggestion': group['attr_suggestion'],
+                    'valuation': f"{group['valuation']:.2f}"
+                })
+            
+            # 计算该优化方向对应的消费者群体占比（所有匹配群体的占比之和）
+            consumer_proportion = sum(g['proportion'] for g in matching_groups)
             
             optimization_options.append({
                 'priority': 0,
                 'attr_name': attr_name,
                 'direction': opt_direction,
-                'current_performance': attr_effect,
+                'current_performance': current_performance,
                 'user_criteria': opt_criteria,
                 'importance_score': importance,
-                'reference_suggestion': reference_suggestion,
-                'reference_gid': reference_gid,
-                'reference_user_profile': reference_profile,
-                'reference_score': reference_score,
-                'reference_valuation': reference_valuation
+                'consumer_proportion': consumer_proportion,
+                'reference_consumers': reference_consumers
             })
     
     # 按重要性降序排序并设置优先级
@@ -527,28 +542,38 @@ async def product_optimization_task(row: pd.Series, logger: Callable[[str], None
                 attrs_info += f"  - 相关性：{direction}\n"
     
     # 构建优化优先顺序表（XML格式，完整内容不截断）
+    def escape_xml(text):
+        if not isinstance(text, str):
+            text = str(text)
+        return (text.replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+                .replace('"', '&quot;')
+                .replace("'", '&apos;'))
+    
     table_xml = "<optimization_priority_table>\n"
     for opt in optimization_table:
-        # 转义XML特殊字符
-        def escape_xml(text):
-            if not isinstance(text, str):
-                text = str(text)
-            return (text.replace('&', '&amp;')
-                    .replace('<', '&lt;')
-                    .replace('>', '&gt;')
-                    .replace('"', '&quot;')
-                    .replace("'", '&apos;'))
-        
         table_xml += f"""  <item priority="{opt['priority']}">
     <attr_name_and_direction>{escape_xml(opt['attr_name'])} - {escape_xml(opt['direction'])}</attr_name_and_direction>
     <current_performance>{escape_xml(opt['current_performance'])}</current_performance>
     <user_criteria>{escape_xml(opt['user_criteria'])}</user_criteria>
+    <consumer_proportion>{opt.get('consumer_proportion', 0.0):.6f}</consumer_proportion>
     <importance_score>{opt['importance_score']:.6f}</importance_score>
-    <reference_suggestion>{escape_xml(opt['reference_suggestion'])}</reference_suggestion>
-    <reference_user_id>{escape_xml(opt.get('reference_gid', '（无）'))}</reference_user_id>
-    <reference_user_profile>{escape_xml(opt['reference_user_profile'])}</reference_user_profile>
-    <reference_score>{escape_xml(opt['reference_score'])}</reference_score>
-    <reference_valuation>{escape_xml(opt['reference_valuation'])}</reference_valuation>
+    <reference_consumer_list>
+"""
+        # 添加参考消费者
+        reference_consumers = opt.get('reference_consumers', [])
+        for idx, consumer in enumerate(reference_consumers, 1):
+            table_xml += f"""      <reference_consumer priority="{idx}">
+        <profile>{escape_xml(consumer.get('profile', '（无）'))}</profile>
+        <proportion>{consumer.get('proportion', 0.0):.6f}</proportion>
+        <effect>{escape_xml(consumer.get('effect', '（无）'))}</effect>
+        <score>{escape_xml(consumer.get('score', '（无）'))}</score>
+        <suggestion>{escape_xml(consumer.get('suggestion', '（无）'))}</suggestion>
+        <valuation>{escape_xml(consumer.get('valuation', '（无）'))}</valuation>
+      </reference_consumer>
+"""
+        table_xml += """    </reference_consumer_list>
   </item>
 """
     table_xml += "</optimization_priority_table>"
@@ -561,7 +586,7 @@ async def product_optimization_task(row: pd.Series, logger: Callable[[str], None
 1. 仔细阅读当前产品的完整设计文档
 2. 理解产品的用户维度划分和属性体系
 3. 分析属性优化优先顺序表，理解每个优化方向的意义和重要性
-4. 思考如何采纳优化建议来改进产品设计，确保所有改动都来源于优化建议，不对其它部分进行多余改动
+4. 参考优化建议来思考如何改进产品设计
 5. 确保优化的技术可行性：优化后的产品设计必须可生产且无矛盾
 6. 生成优化后的产品设计文档
 7. 为每个优化方向生成建议分析（是否采纳及原因）
@@ -595,19 +620,42 @@ async def product_optimization_task(row: pd.Series, logger: Callable[[str], None
 {table_xml}
 
 <optimization_table_explanation>
-1. **三种优化方向**：三种优化方向分别关注该属性所对应用户维度的三种取值群体。
-2. **当前表现**：优化前产品在该属性上的具体表现。
-3. **用户判定标准**：该属性对应用户维度在该取值的判定标准。
-4. **重要性分数**：根据市场反馈，计算对应群体所占的人群比例与价格对该维度的灵敏度相乘得到。取值越高说明优化该方向对产品销售表现的提高潜力越大。本表格以此为标准降序排序。
-5. **参考优化建议及对应群体**：选择对应取值的各个群体中，估值最接近最佳定价的群体（最佳定价附近的群体的估值是决定产品售价的瓶颈群体，优先提高他们的估值对提高产品的整体市场表现最重要）。
-6. **提供优化建议群体对该属性的打分**：打分的取值为-2、-1、0、1、2五种，分别对应非常抗拒、抗拒、无感、喜欢、非常喜欢。
+本表格列出了产品各个属性的优化方向，按重要性降序排序。每个优化方向（item）包含以下字段：
+
+1. **attr_name_and_direction**：对优化方向的说明，格式为"属性名称 - 优化方向"。优化方向有三种：
+   - "对负价值群体减少负面影响"：针对该属性对应用户维度上取值为负价值的群体
+   - "对无价值群体增强吸引力"：针对该属性对应用户维度上取值为无价值的群体
+   - "对正价值群体提高满意度"：针对该属性对应用户维度上取值为正价值的群体
+
+2. **current_performance**：当前优化前的产品在该属性上的表现，即该属性的具体描述。
+
+3. **user_criteria**：优化目标群体的定义，所有提供建议的群体都满足该定义。这是该属性对应用户维度在该取值（负价值或正价值）的判定标准。
+
+4. **consumer_proportion**：当前优化方向对应消费者群体的占比，即所有满足user_criteria的群体的占比之和。
+
+5. **importance_score**：当前优化方向的重要性指标，计算公式为：
+   I = p² × Σ(群体占比 / (|群体估值 - 最佳定价| + ε)²)
+   其中p为最佳定价，ε=p/100。值越大越重要，本表格按此指标降序排序。
+
+6. **reference_consumer_list**：选取该优化方向群体的几个代表性的消费者对象，获取他们的体验反馈。最多包含5个参考消费者，按群体重要性指标降序排列。每个参考消费者（reference_consumer）包含：
+   - **profile**：该消费者的用户画像
+   - **proportion**：与该消费者相似的人数的占比（即该群体的占比）
+   - **effect**：该消费者的使用效果体验
+   - **score**：该消费者对使用体验的打分，取值为-2、-1、0、1、2，分别对应非常抗拒、抗拒、无感、喜欢、非常喜欢
+   - **suggestion**：该消费者对优化这一属性提出的建议
+   - **valuation**：该消费者对整个产品的估值，表明该消费者认为价钱在多少以下时自己愿意购买
 </optimization_table_explanation>
 
 <optimization_rules>
-1. 尽可能多的采纳表中所有优化方向的所有优化建议。当优化建议之间有冲突时，优先采纳排在前面的建议。
-2. 优化的唯一目的是提高各个用户群体对产品的估值，即愿意以更高的价格购买。
+1. 优化的唯一目的是提高各个用户群体对产品的估值，即愿意以更高的价格购买。这意味着你**不应该考虑或采纳所有缩减成本相关的建议，这可能反而导致用户估值的降低**
+2. 你应该在独立思考如何优化的同时，适当参考优化建议，并给出你的论证。当优化建议之间有矛盾冲突时，优先考虑排在前面的建议。
 3. 技术可行性要求：必须确保优化后的产品设计可生产且无矛盾。所有优化必须考虑实际生产的技术限制和成本约束。
-4. 改动限制：除根据采纳的建议进行针对性修改以外，不对其它部分进行多余改动。所有的改动必须来源于优化建议，不能随意添加或删除未在建议中提及的内容。
+4. **文档正式性要求**：优化后的产品文档（hard_design、core_features、value_proposition）必须是一个正式版的文档，不能显示出任何修改和编辑的痕迹。具体要求：
+   - 绝对禁止使用括号标注修改的地方（如"（已优化）"、"（改进）"等）
+   - 绝对禁止注明"从...改为..."、"原为...现为..."等修改说明
+   - 绝对禁止使用任何形式的修改标记、注释或说明
+   - 输出的文档应该像直接写出来的正式文档一样，完全看不出是经过修改的版本
+   - 所有优化内容应该自然地融入到文档中，以正式、完整、流畅的方式呈现
 </optimization_rules>
 
 <output_format>
@@ -616,19 +664,16 @@ async def product_optimization_task(row: pd.Series, logger: Callable[[str], None
 <hard_design>
 优化后的硬性设计部分：包括技术指标、设计细节、材料规格、尺寸等具体设计元素。
 格式：一段markdown风格的文本，不要用```markdown```或``````包括，格式工整规范。
-注意：只根据采纳的优化建议进行针对性修改，不对其它部分进行多余改动。
 </hard_design>
 
 <core_features>
 优化后的核心功能介绍：描述产品的主要功能、优势、如何使用以及解决的用户痛点。
 格式：一段markdown风格的文本，不要用```markdown```或``````包括，格式工整规范。
-注意：只根据采纳的优化建议进行针对性修改，不对其它部分进行多余改动。
 </core_features>
 
 <value_proposition>
 优化后的价值定位部分：说明产品的市场定位、目标用户群、竞争优势和独特卖点。
 格式：一段markdown风格的文本，不要用```markdown```或``````包括，格式工整规范。
-注意：只根据采纳的优化建议进行针对性修改，不对其它部分进行多余改动。
 </value_proposition>
 
 <feasibility_analysis>
@@ -654,7 +699,6 @@ async def product_optimization_task(row: pd.Series, logger: Callable[[str], None
 1. 所有的输出内容必须使用中文
 2. suggestion_analysis中的每个item必须与optimization_priority_table中的每一行一一对应
 3. 属性名称和优化方向必须与表格中的"属性名称+优化方向"字段内容完全一致
-4. 所有改动必须来源于优化建议，不能随意添加或删除未在建议中提及的内容
 </output_format>
 """
     
